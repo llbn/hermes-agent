@@ -341,8 +341,8 @@ def test_cmd_model_forwards_nous_login_tls_options(monkeypatch):
 
     hermes_main.cmd_model(
         SimpleNamespace(
-            portal_url="https://portal.rewbs.uk",
-            inference_url="https://inference.rewbs.uk/v1",
+            portal_url="https://portal.nousresearch.com",
+            inference_url="https://inference.nousresearch.com/v1",
             client_id="hermes-local",
             scope="openid profile",
             no_browser=True,
@@ -353,8 +353,8 @@ def test_cmd_model_forwards_nous_login_tls_options(monkeypatch):
     )
 
     assert captured == {
-        "portal_url": "https://portal.rewbs.uk",
-        "inference_url": "https://inference.rewbs.uk/v1",
+        "portal_url": "https://portal.nousresearch.com",
+        "inference_url": "https://inference.nousresearch.com/v1",
         "client_id": "hermes-local",
         "scope": "openid profile",
         "no_browser": True,
