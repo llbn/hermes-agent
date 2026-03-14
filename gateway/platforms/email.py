@@ -387,15 +387,16 @@ class EmailAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Send an email reply to the given address."""
-        try:
-            loop = asyncio.get_running_loop()
-            message_id = await loop.run_in_executor(
-                None, self._send_email, chat_id, content, reply_to
-            )
-            return SendResult(success=True, message_id=message_id)
-        except Exception as e:
-            logger.error("[Email] Send failed to %s: %s", chat_id, e)
-            return SendResult(success=False, error=str(e))
+        from gateway.outbound.service import send_email_text
+
+        return await send_email_text(
+            self.config,
+            chat_id,
+            content,
+            reply_to=reply_to,
+            metadata=metadata,
+            adapter=self,
+        )
 
     def _send_email(
         self,

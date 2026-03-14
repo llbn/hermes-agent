@@ -9,7 +9,19 @@ import json
 import logging
 import os
 import re
-import time
+
+from gateway.config import Platform, PlatformConfig
+from gateway.outbound.service import (
+    get_supported_platform_names,
+    resolve_outbound_platform,
+    send_discord_text as _shared_send_discord_text,
+    send_email_text as _shared_send_email_text,
+    send_result_to_legacy_dict,
+    send_signal_text as _shared_send_signal_text,
+    send_slack_text as _shared_send_slack_text,
+    send_telegram_text as _shared_send_telegram_text,
+    send_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,22 +120,14 @@ def _handle_send(args):
         return json.dumps({"error": "Interrupted"})
 
     try:
-        from gateway.config import load_gateway_config, Platform
+        from gateway.config import load_gateway_config
         config = load_gateway_config()
     except Exception as e:
         return json.dumps({"error": f"Failed to load gateway config: {e}"})
 
-    platform_map = {
-        "telegram": Platform.TELEGRAM,
-        "discord": Platform.DISCORD,
-        "slack": Platform.SLACK,
-        "whatsapp": Platform.WHATSAPP,
-        "signal": Platform.SIGNAL,
-        "email": Platform.EMAIL,
-    }
-    platform = platform_map.get(platform_name)
+    platform = resolve_outbound_platform(platform_name)
     if not platform:
-        avail = ", ".join(platform_map.keys())
+        avail = ", ".join(get_supported_platform_names())
         return json.dumps({"error": f"Unknown platform: {platform_name}. Available: {avail}"})
 
     pconfig = config.platforms.get(platform)
@@ -177,142 +181,54 @@ def _parse_target_ref(platform_name: str, target_ref: str):
 
 async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None):
     """Route a message to the appropriate platform sender."""
-    from gateway.config import Platform
-    if platform == Platform.TELEGRAM:
-        return await _send_telegram(pconfig.token, chat_id, message, thread_id=thread_id)
-    elif platform == Platform.DISCORD:
-        return await _send_discord(pconfig.token, chat_id, message)
-    elif platform == Platform.SLACK:
-        return await _send_slack(pconfig.token, chat_id, message)
-    elif platform == Platform.SIGNAL:
-        return await _send_signal(pconfig.extra, chat_id, message)
-    elif platform == Platform.EMAIL:
-        return await _send_email(pconfig.extra, chat_id, message)
-    return {"error": f"Direct sending not yet implemented for {platform.value}"}
+    result = await send_text(
+        platform,
+        pconfig,
+        chat_id,
+        message,
+        metadata={"thread_id": thread_id} if thread_id is not None else None,
+    )
+    return send_result_to_legacy_dict(platform, chat_id, result)
 
 
 async def _send_telegram(token, chat_id, message, thread_id=None):
-    """Send via Telegram Bot API (one-shot, no polling needed)."""
-    try:
-        from telegram import Bot
-        bot = Bot(token=token)
-        send_kwargs = {"chat_id": int(chat_id), "text": message}
-        if thread_id is not None:
-            send_kwargs["message_thread_id"] = int(thread_id)
-        msg = await bot.send_message(**send_kwargs)
-        return {"success": True, "platform": "telegram", "chat_id": chat_id, "message_id": str(msg.message_id)}
-    except ImportError:
-        return {"error": "python-telegram-bot not installed. Run: pip install python-telegram-bot"}
-    except Exception as e:
-        return {"error": f"Telegram send failed: {e}"}
+    """Compatibility wrapper for the shared standalone Telegram sender."""
+    config = PlatformConfig(enabled=True, token=token)
+    result = await _shared_send_telegram_text(
+        config,
+        chat_id,
+        message,
+        metadata={"thread_id": thread_id} if thread_id is not None else None,
+    )
+    return send_result_to_legacy_dict(Platform.TELEGRAM, chat_id, result)
 
 
 async def _send_discord(token, chat_id, message):
-    """Send via Discord REST API (no websocket client needed)."""
-    try:
-        import aiohttp
-    except ImportError:
-        return {"error": "aiohttp not installed. Run: pip install aiohttp"}
-    try:
-        url = f"https://discord.com/api/v10/channels/{chat_id}/messages"
-        headers = {"Authorization": f"Bot {token}", "Content-Type": "application/json"}
-        chunks = [message[i:i+2000] for i in range(0, len(message), 2000)]
-        message_ids = []
-        async with aiohttp.ClientSession() as session:
-            for chunk in chunks:
-                async with session.post(url, headers=headers, json={"content": chunk}) as resp:
-                    if resp.status not in (200, 201):
-                        body = await resp.text()
-                        return {"error": f"Discord API error ({resp.status}): {body}"}
-                    data = await resp.json()
-                    message_ids.append(data.get("id"))
-        return {"success": True, "platform": "discord", "chat_id": chat_id, "message_ids": message_ids}
-    except Exception as e:
-        return {"error": f"Discord send failed: {e}"}
+    """Compatibility wrapper for the shared standalone Discord sender."""
+    config = PlatformConfig(enabled=True, token=token)
+    result = await _shared_send_discord_text(config, chat_id, message)
+    return send_result_to_legacy_dict(Platform.DISCORD, chat_id, result)
 
 
 async def _send_slack(token, chat_id, message):
-    """Send via Slack Web API."""
-    try:
-        import aiohttp
-    except ImportError:
-        return {"error": "aiohttp not installed. Run: pip install aiohttp"}
-    try:
-        url = "https://slack.com/api/chat.postMessage"
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json={"channel": chat_id, "text": message}) as resp:
-                data = await resp.json()
-                if data.get("ok"):
-                    return {"success": True, "platform": "slack", "chat_id": chat_id, "message_id": data.get("ts")}
-                return {"error": f"Slack API error: {data.get('error', 'unknown')}"}
-    except Exception as e:
-        return {"error": f"Slack send failed: {e}"}
+    """Compatibility wrapper for the shared standalone Slack sender."""
+    config = PlatformConfig(enabled=True, token=token)
+    result = await _shared_send_slack_text(config, chat_id, message)
+    return send_result_to_legacy_dict(Platform.SLACK, chat_id, result)
 
 
 async def _send_signal(extra, chat_id, message):
-    """Send via signal-cli JSON-RPC API."""
-    try:
-        import httpx
-    except ImportError:
-        return {"error": "httpx not installed"}
-    try:
-        http_url = extra.get("http_url", "http://127.0.0.1:8080").rstrip("/")
-        account = extra.get("account", "")
-        if not account:
-            return {"error": "Signal account not configured"}
-
-        params = {"account": account, "message": message}
-        if chat_id.startswith("group:"):
-            params["groupId"] = chat_id[6:]
-        else:
-            params["recipient"] = [chat_id]
-
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "send",
-            "params": params,
-            "id": f"send_{int(time.time() * 1000)}",
-        }
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(f"{http_url}/api/v1/rpc", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            if "error" in data:
-                return {"error": f"Signal RPC error: {data['error']}"}
-            return {"success": True, "platform": "signal", "chat_id": chat_id}
-    except Exception as e:
-        return {"error": f"Signal send failed: {e}"}
+    """Compatibility wrapper for the shared standalone Signal sender."""
+    config = PlatformConfig(enabled=True, extra=extra or {})
+    result = await _shared_send_signal_text(config, chat_id, message)
+    return send_result_to_legacy_dict(Platform.SIGNAL, chat_id, result)
 
 
 async def _send_email(extra, chat_id, message):
-    """Send via SMTP (one-shot, no persistent connection needed)."""
-    import smtplib
-    from email.mime.text import MIMEText
-
-    address = extra.get("address") or os.getenv("EMAIL_ADDRESS", "")
-    password = os.getenv("EMAIL_PASSWORD", "")
-    smtp_host = extra.get("smtp_host") or os.getenv("EMAIL_SMTP_HOST", "")
-    smtp_port = int(os.getenv("EMAIL_SMTP_PORT", "587"))
-
-    if not all([address, password, smtp_host]):
-        return {"error": "Email not configured (EMAIL_ADDRESS, EMAIL_PASSWORD, EMAIL_SMTP_HOST required)"}
-
-    try:
-        msg = MIMEText(message, "plain", "utf-8")
-        msg["From"] = address
-        msg["To"] = chat_id
-        msg["Subject"] = "Hermes Agent"
-
-        server = smtplib.SMTP(smtp_host, smtp_port)
-        server.starttls()
-        server.login(address, password)
-        server.send_message(msg)
-        server.quit()
-        return {"success": True, "platform": "email", "chat_id": chat_id}
-    except Exception as e:
-        return {"error": f"Email send failed: {e}"}
+    """Compatibility wrapper for the shared standalone Email sender."""
+    config = PlatformConfig(enabled=True, extra=extra or {})
+    result = await _shared_send_email_text(config, chat_id, message)
+    return send_result_to_legacy_dict(Platform.EMAIL, chat_id, result)
 
 
 def _check_send_message():

@@ -149,45 +149,16 @@ class SlackAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Send a message to a Slack channel or DM."""
-        if not self._app:
-            return SendResult(success=False, error="Not connected")
+        from gateway.outbound.service import send_slack_text
 
-        try:
-            # Convert standard markdown → Slack mrkdwn
-            formatted = self.format_message(content)
-
-            # Split long messages, preserving code block boundaries
-            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
-
-            thread_ts = self._resolve_thread_ts(reply_to, metadata)
-            last_result = None
-
-            # reply_broadcast: also post thread replies to the main channel.
-            # Controlled via platform config: gateway.slack.reply_broadcast
-            broadcast = self.config.extra.get("reply_broadcast", False)
-
-            for i, chunk in enumerate(chunks):
-                kwargs = {
-                    "channel": chat_id,
-                    "text": chunk,
-                }
-                if thread_ts:
-                    kwargs["thread_ts"] = thread_ts
-                    # Only broadcast the first chunk of the first reply
-                    if broadcast and i == 0:
-                        kwargs["reply_broadcast"] = True
-
-                last_result = await self._app.client.chat_postMessage(**kwargs)
-
-            return SendResult(
-                success=True,
-                message_id=last_result.get("ts") if last_result else None,
-                raw_response=last_result,
-            )
-
-        except Exception as e:  # pragma: no cover - defensive logging
-            logger.error("[Slack] Send error: %s", e, exc_info=True)
-            return SendResult(success=False, error=str(e))
+        return await send_slack_text(
+            self.config,
+            chat_id,
+            content,
+            reply_to=reply_to,
+            metadata=metadata,
+            adapter=self,
+        )
 
     async def edit_message(
         self,

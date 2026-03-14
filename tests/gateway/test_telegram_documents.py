@@ -38,6 +38,7 @@ def _ensure_telegram_mock():
     telegram_mod = MagicMock()
     # ContextTypes needs DEFAULT_TYPE as an actual attribute for the annotation
     telegram_mod.ext.ContextTypes.DEFAULT_TYPE = type(None)
+    telegram_mod.constants.ParseMode.HTML = "HTML"
     telegram_mod.constants.ParseMode.MARKDOWN_V2 = "MarkdownV2"
     telegram_mod.constants.ChatType.GROUP = "group"
     telegram_mod.constants.ChatType.SUPERGROUP = "supergroup"

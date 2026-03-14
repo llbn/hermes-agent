@@ -17,6 +17,15 @@ from gateway.config import PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 
 
+def _run_async(coro):
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
+
+
 # ---------------------------------------------------------------------------
 # MEDIA: extraction tests for image files
 # ---------------------------------------------------------------------------
@@ -65,6 +74,7 @@ def _ensure_telegram_mock():
 
     telegram_mod = MagicMock()
     telegram_mod.ext.ContextTypes.DEFAULT_TYPE = type(None)
+    telegram_mod.constants.ParseMode.HTML = "HTML"
     telegram_mod.constants.ParseMode.MARKDOWN_V2 = "MarkdownV2"
     telegram_mod.constants.ChatType.GROUP = "group"
     telegram_mod.constants.ChatType.SUPERGROUP = "supergroup"
@@ -97,7 +107,7 @@ class TestTelegramSendImageFile:
         mock_msg.message_id = 42
         adapter._bot.send_photo = AsyncMock(return_value=mock_msg)
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             adapter.send_image_file(chat_id="12345", image_path=str(img))
         )
         assert result.success
@@ -110,7 +120,7 @@ class TestTelegramSendImageFile:
 
     def test_returns_error_when_file_missing(self, adapter):
         """send_image_file should return error for nonexistent file."""
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             adapter.send_image_file(chat_id="12345", image_path="/nonexistent/image.png")
         )
         assert not result.success
@@ -119,7 +129,7 @@ class TestTelegramSendImageFile:
     def test_returns_error_when_not_connected(self, adapter):
         """send_image_file should return error when bot is None."""
         adapter._bot = None
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             adapter.send_image_file(chat_id="12345", image_path="/tmp/img.png")
         )
         assert not result.success
@@ -135,7 +145,7 @@ class TestTelegramSendImageFile:
         adapter._bot.send_photo = AsyncMock(return_value=mock_msg)
 
         long_caption = "A" * 2000
-        asyncio.get_event_loop().run_until_complete(
+        _run_async(
             adapter.send_image_file(chat_id="12345", image_path=str(img), caption=long_caption)
         )
 
@@ -187,7 +197,7 @@ class TestDiscordSendImageFile:
         mock_channel.send = AsyncMock(return_value=mock_msg)
         adapter._client.get_channel = MagicMock(return_value=mock_channel)
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             adapter.send_image_file(chat_id="67890", image_path=str(img))
         )
         assert result.success
@@ -195,7 +205,7 @@ class TestDiscordSendImageFile:
         mock_channel.send.assert_awaited_once()
 
     def test_returns_error_when_file_missing(self, adapter):
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             adapter.send_image_file(chat_id="67890", image_path="/nonexistent.png")
         )
         assert not result.success
@@ -203,7 +213,7 @@ class TestDiscordSendImageFile:
 
     def test_returns_error_when_not_connected(self, adapter):
         adapter._client = None
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             adapter.send_image_file(chat_id="67890", image_path="/tmp/img.png")
         )
         assert not result.success
@@ -213,7 +223,7 @@ class TestDiscordSendImageFile:
         adapter._client.get_channel = MagicMock(return_value=None)
         adapter._client.fetch_channel = AsyncMock(return_value=None)
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             adapter.send_image_file(chat_id="99999", image_path="/tmp/img.png")
         )
         assert not result.success
@@ -256,7 +266,7 @@ class TestSlackSendImageFile:
         mock_result = MagicMock()
         adapter._app.client.files_upload_v2 = AsyncMock(return_value=mock_result)
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             adapter.send_image_file(chat_id="C12345", image_path=str(img))
         )
         assert result.success
@@ -268,7 +278,7 @@ class TestSlackSendImageFile:
         assert call_kwargs["channel"] == "C12345"
 
     def test_returns_error_when_file_missing(self, adapter):
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             adapter.send_image_file(chat_id="C12345", image_path="/nonexistent.png")
         )
         assert not result.success
@@ -276,7 +286,7 @@ class TestSlackSendImageFile:
 
     def test_returns_error_when_not_connected(self, adapter):
         adapter._app = None
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             adapter.send_image_file(chat_id="C12345", image_path="/tmp/img.png")
         )
         assert not result.success

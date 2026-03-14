@@ -2,11 +2,12 @@
 
 import json
 import logging
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
 from cron.scheduler import _resolve_origin, _deliver_result, run_job
+from gateway.platforms.base import SendResult
 
 
 class TestResolveOrigin:
@@ -57,7 +58,7 @@ class TestDeliverResultMirrorLogging:
         mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
 
         with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
-             patch("asyncio.run", return_value=None), \
+             patch("gateway.outbound.service.send_text", new=AsyncMock(return_value=SendResult(success=True))), \
              patch("gateway.mirror.mirror_to_session", side_effect=ConnectionError("network down")):
             job = {
                 "id": "test-job",
@@ -90,13 +91,12 @@ class TestDeliverResultMirrorLogging:
         }
 
         with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
-             patch("tools.send_message_tool._send_to_platform", return_value={"success": True}) as send_mock, \
-             patch("gateway.mirror.mirror_to_session") as mirror_mock, \
-             patch("asyncio.run", side_effect=lambda coro: None):
+             patch("gateway.outbound.service.send_text", new=AsyncMock(return_value=SendResult(success=True))) as send_mock, \
+             patch("gateway.mirror.mirror_to_session") as mirror_mock:
             _deliver_result(job, "hello")
 
-        send_mock.assert_called_once()
-        assert send_mock.call_args.kwargs["thread_id"] == "17585"
+        send_mock.assert_awaited_once()
+        assert send_mock.await_args.kwargs["metadata"]["thread_id"] == "17585"
         mirror_mock.assert_called_once_with(
             "telegram",
             "-1001",
@@ -104,6 +104,29 @@ class TestDeliverResultMirrorLogging:
             source_label="cron",
             thread_id="17585",
         )
+
+    def test_platform_delivery_uses_home_channel_from_gateway_config(self):
+        """Bare platform delivery should use gateway config home_channel, not only env vars."""
+        from gateway.config import HomeChannel, Platform, PlatformConfig
+
+        pconfig = PlatformConfig(enabled=True, token="fake-token")
+        pconfig.home_channel = HomeChannel(platform=Platform.TELEGRAM, chat_id="-2002", name="Home")
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        mock_cfg.get_home_channel.return_value = pconfig.home_channel
+
+        job = {
+            "id": "test-job",
+            "deliver": "telegram",
+        }
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("gateway.outbound.service.send_text", new=AsyncMock(return_value=SendResult(success=True))) as send_mock, \
+             patch("gateway.mirror.mirror_to_session"):
+            _deliver_result(job, "hello")
+
+        send_mock.assert_awaited_once()
+        assert send_mock.await_args.args[2] == "-2002"
 
 
 class TestRunJobConfigLogging:
