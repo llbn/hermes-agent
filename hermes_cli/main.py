@@ -1889,18 +1889,30 @@ def cmd_uninstall(args):
     run_uninstall(args)
 
 
+def _get_update_remote() -> str:
+    """Return the git remote to fetch updates from."""
+    from hermes_cli.config import get_env_value
+    return get_env_value("HERMES_UPDATE_REMOTE") or "origin"
+
+
+def _get_update_branch() -> str:
+    """Return the git branch to pull updates from."""
+    from hermes_cli.config import get_env_value
+    return get_env_value("HERMES_UPDATE_BRANCH") or "main"
+
+
 def _update_via_zip(args):
     """Update Hermes Agent by downloading a ZIP archive.
-    
-    Used on Windows when git file I/O is broken (antivirus, NTFS filter 
+
+    Used on Windows when git file I/O is broken (antivirus, NTFS filter
     drivers causing 'Invalid argument' errors on file creation).
     """
     import shutil
     import tempfile
     import zipfile
     from urllib.request import urlretrieve
-    
-    branch = "main"
+
+    branch = _get_update_branch()
     zip_url = f"https://github.com/NousResearch/hermes-agent/archive/refs/heads/{branch}.zip"
     
     print("→ Downloading latest version...")
@@ -2140,45 +2152,30 @@ def cmd_update(args):
 
     # Fetch and pull
     try:
-        print("→ Fetching updates...")
+        remote = _get_update_remote()
+        branch = _get_update_branch()
+
+        print(f"→ Fetching updates from {remote}/{branch}...")
         git_cmd = ["git"]
         if sys.platform == "win32":
             git_cmd = ["git", "-c", "windows.appendAtomically=false"]
-        
-        subprocess.run(git_cmd + ["fetch", "origin"], cwd=PROJECT_ROOT, check=True)
-        
-        # Get current branch
-        result = subprocess.run(
-            git_cmd + ["rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        branch = result.stdout.strip()
 
-        # Fall back to main if the current branch doesn't exist on the remote
-        verify = subprocess.run(
-            git_cmd + ["rev-parse", "--verify", f"origin/{branch}"],
-            cwd=PROJECT_ROOT, capture_output=True, text=True,
-        )
-        if verify.returncode != 0:
-            branch = "main"
+        subprocess.run(git_cmd + ["fetch", remote], cwd=PROJECT_ROOT, check=True)
 
         # Check if there are updates
         result = subprocess.run(
-            git_cmd + ["rev-list", f"HEAD..origin/{branch}", "--count"],
+            git_cmd + ["rev-list", f"HEAD..{remote}/{branch}", "--count"],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
             check=True
         )
         commit_count = int(result.stdout.strip())
-        
+
         if commit_count == 0:
             print("✓ Already up to date!")
             return
-        
+
         print(f"→ Found {commit_count} new commit(s)")
 
         auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
@@ -2186,7 +2183,7 @@ def cmd_update(args):
 
         print("→ Pulling updates...")
         try:
-            subprocess.run(git_cmd + ["pull", "origin", branch], cwd=PROJECT_ROOT, check=True)
+            subprocess.run(git_cmd + ["pull", remote, branch], cwd=PROJECT_ROOT, check=True)
         finally:
             if auto_stash_ref is not None:
                 _restore_stashed_changes(
