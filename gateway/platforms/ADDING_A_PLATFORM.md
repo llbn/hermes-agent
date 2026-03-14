@@ -81,7 +81,37 @@ Update `get_connected_platforms()` if your platform doesn't use token/api_key
 
 ---
 
-## 3. Adapter Factory (`gateway/run.py`)
+## 3. Outbound Sender (`gateway/outbound/<platform>.py`)
+
+Create a shared outbound sender for your platform.
+
+This sender is the single source of truth for outbound text formatting and
+chunking across:
+
+- live gateway replies (`adapter.send()`)
+- `send_message`
+- cron delivery
+- `DeliveryRouter`
+
+Implement a `BaseOutboundTextSender` and register it once in
+`gateway/outbound/registry.py`.
+
+Required sender behavior:
+
+- `platform`
+- `capabilities`
+- `prepare_text(content)` for formatting/chunking
+- `send_connected(adapter, request, chunks)` for live gateway delivery
+- `send_direct(config, request, chunks)` for standalone delivery when the
+  gateway process is not running
+
+If the platform cannot support standalone delivery, set
+`supports_direct_send=False`. `send_message` and cron will then fail with a
+clear capability error instead of silently diverging.
+
+---
+
+## 4. Adapter Factory (`gateway/run.py`)
 
 Add to `_create_adapter()`:
 
@@ -96,7 +126,7 @@ elif platform == Platform.YOUR_PLATFORM:
 
 ---
 
-## 4. Authorization Maps (`gateway/run.py`)
+## 5. Authorization Maps (`gateway/run.py`)
 
 Add to BOTH dicts in `_is_user_authorized()`:
 
@@ -113,7 +143,7 @@ platform_allow_all_map = {
 
 ---
 
-## 5. Session Source (`gateway/session.py`)
+## 6. Session Source (`gateway/session.py`)
 
 If your platform needs extra identity fields (e.g., Signal's UUID alongside
 phone number), add them to the `SessionSource` dataclass with `Optional` defaults,
@@ -121,7 +151,7 @@ and update `to_dict()`, `from_dict()`, and `build_source()` in base.py.
 
 ---
 
-## 6. System Prompt Hints (`agent/prompt_builder.py`)
+## 7. System Prompt Hints (`agent/prompt_builder.py`)
 
 Add a `PLATFORM_HINTS` entry so the agent knows what platform it's on:
 
@@ -140,7 +170,7 @@ inappropriate formatting (e.g., markdown on platforms that don't render it).
 
 ---
 
-## 7. Toolset (`toolsets.py`)
+## 8. Toolset (`toolsets.py`)
 
 Add a named toolset for your platform:
 
@@ -162,44 +192,22 @@ And add it to the `hermes-gateway` composite:
 
 ---
 
-## 8. Cron Delivery (`cron/scheduler.py`)
+## 9. Shared Direct Delivery (`cron/scheduler.py`, `tools/send_message_tool.py`)
 
-Add to `platform_map` in `_deliver_result()`:
+There are no per-platform delivery maps in cron or `send_message` anymore.
 
-```python
-platform_map = {
-    ...
-    "your_platform": Platform.YOUR_PLATFORM,
-}
-```
+Once your outbound sender is registered:
 
-Without this, `cronjob(action="create", deliver="your_platform", ...)` silently fails.
+- `send_message` can resolve `platform:target` using the outbound registry
+- cron can resolve `deliver="your_platform"` and `deliver="origin"` through
+  the same outbound sender
+- both paths will reuse the same formatting/chunking as the live adapter path
 
----
+If your platform needs custom target parsing beyond plain numeric IDs, implement
+`parse_target_ref()` on the outbound sender.
 
-## 9. Send Message Tool (`tools/send_message_tool.py`)
-
-Add to `platform_map` in `send_message_tool()`:
-
-```python
-platform_map = {
-    ...
-    "your_platform": Platform.YOUR_PLATFORM,
-}
-```
-
-Add routing in `_send_to_platform()`:
-
-```python
-elif platform == Platform.YOUR_PLATFORM:
-    return await _send_your_platform(pconfig, chat_id, message)
-```
-
-Implement `_send_your_platform()` — a standalone async function that sends
-a single message without requiring the full adapter (for use by cron jobs
-and the send_message tool outside the gateway process).
-
-Update the tool schema `target` description to include your platform example.
+Update the `send_message` tool schema examples if your platform needs a
+non-obvious target format.
 
 ---
 

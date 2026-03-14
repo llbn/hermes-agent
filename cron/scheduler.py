@@ -122,26 +122,19 @@ def _deliver_result(job: dict, content: str) -> None:
     chat_id = target["chat_id"]
     thread_id = target.get("thread_id")
 
-    from tools.send_message_tool import _send_to_platform
-    from gateway.config import load_gateway_config, Platform
-
-    platform_map = {
-        "telegram": Platform.TELEGRAM,
-        "discord": Platform.DISCORD,
-        "slack": Platform.SLACK,
-        "whatsapp": Platform.WHATSAPP,
-        "signal": Platform.SIGNAL,
-        "email": Platform.EMAIL,
-    }
-    platform = platform_map.get(platform_name.lower())
-    if not platform:
-        logger.warning("Job '%s': unknown platform '%s' for delivery", job["id"], platform_name)
-        return
-
     try:
+        from gateway.config import load_gateway_config
+        from gateway.outbound import resolve_platform_name
+        from gateway.outbound.service import send_direct_text
+
         config = load_gateway_config()
     except Exception as e:
         logger.error("Job '%s': failed to load gateway config for delivery: %s", job["id"], e)
+        return
+
+    platform = resolve_platform_name(platform_name)
+    if not platform:
+        logger.warning("Job '%s': unknown platform '%s' for delivery", job["id"], platform_name)
         return
 
     pconfig = config.platforms.get(platform)
@@ -151,13 +144,30 @@ def _deliver_result(job: dict, content: str) -> None:
 
     # Run the async send in a fresh event loop (safe from any thread)
     try:
-        result = asyncio.run(_send_to_platform(platform, pconfig, chat_id, content, thread_id=thread_id))
+        result = asyncio.run(
+            send_direct_text(
+                platform,
+                pconfig,
+                chat_id,
+                content,
+                metadata={"thread_id": thread_id} if thread_id else None,
+            )
+        )
     except RuntimeError:
         # asyncio.run() fails if there's already a running loop in this thread;
         # spin up a new thread to avoid that.
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, content, thread_id=thread_id))
+            future = pool.submit(
+                asyncio.run,
+                send_direct_text(
+                    platform,
+                    pconfig,
+                    chat_id,
+                    content,
+                    metadata={"thread_id": thread_id} if thread_id else None,
+                ),
+            )
             result = future.result(timeout=30)
     except Exception as e:
         logger.error("Job '%s': delivery to %s:%s failed: %s", job["id"], platform_name, chat_id, e)

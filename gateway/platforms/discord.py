@@ -611,68 +611,15 @@ class DiscordAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None
     ) -> SendResult:
         """Send a message to a Discord channel."""
-        if not self._client:
-            return SendResult(success=False, error="Not connected")
-        
-        try:
-            # Get the channel
-            channel = self._client.get_channel(int(chat_id))
-            if not channel:
-                channel = await self._client.fetch_channel(int(chat_id))
-            
-            if not channel:
-                return SendResult(success=False, error=f"Channel {chat_id} not found")
-            
-            # Format and split message if needed
-            formatted = self.format_message(content)
-            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
-            
-            message_ids = []
-            reference = None
-            
-            if reply_to:
-                try:
-                    ref_msg = await channel.fetch_message(int(reply_to))
-                    reference = ref_msg
-                except Exception as e:
-                    logger.debug("Could not fetch reply-to message: %s", e)
-            
-            for i, chunk in enumerate(chunks):
-                chunk_reference = reference if i == 0 else None
-                try:
-                    msg = await channel.send(
-                        content=chunk,
-                        reference=chunk_reference,
-                    )
-                except Exception as e:
-                    err_text = str(e)
-                    if (
-                        chunk_reference is not None
-                        and "error code: 50035" in err_text
-                        and "Cannot reply to a system message" in err_text
-                    ):
-                        logger.warning(
-                            "[%s] Reply target %s is a Discord system message; retrying send without reply reference",
-                            self.name,
-                            reply_to,
-                        )
-                        msg = await channel.send(
-                            content=chunk,
-                            reference=None,
-                        )
-                    else:
-                        raise
-                message_ids.append(str(msg.id))
-            
-            return SendResult(
-                success=True,
-                message_id=message_ids[0] if message_ids else None,
-                raw_response={"message_ids": message_ids}
-            )
-            
-        except Exception as e:  # pragma: no cover - defensive logging
-            logger.error("[%s] Failed to send Discord message: %s", self.name, e, exc_info=True)
-            return SendResult(success=False, error=str(e))
+        from gateway.outbound.service import send_connected_text
+
+        return await send_connected_text(
+            self,
+            chat_id=str(chat_id),
+            content=content,
+            reply_to=reply_to,
+            metadata=metadata,
+        )
 
     async def edit_message(
         self,

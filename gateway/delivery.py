@@ -278,9 +278,16 @@ class DeliveryRouter:
         
         if not target.chat_id:
             raise ValueError(f"No chat ID for {target.platform.value} delivery")
-        
-        # Guard: truncate oversized cron output to stay within platform limits
-        if len(content) > MAX_PLATFORM_OUTPUT:
+
+        from gateway.outbound import get_sender
+        from gateway.outbound.service import send_connected_text
+
+        # Safety net: platforms without chunking get oversized output
+        # saved to disk and truncated with a pointer, so we never try to
+        # push an unbounded blob through a platform API.
+        sender = get_sender(target.platform)
+        chunks = sender.prepare_text(content)
+        if len(chunks) == 1 and len(chunks[0].body) > MAX_PLATFORM_OUTPUT:
             job_id = (metadata or {}).get("job_id", "unknown")
             saved_path = self._save_full_output(content, job_id)
             logger.info("Cron output truncated (%d chars) — full output: %s", len(content), saved_path)
@@ -288,11 +295,17 @@ class DeliveryRouter:
                 content[:TRUNCATED_VISIBLE]
                 + f"\n\n... [truncated, full output saved to {saved_path}]"
             )
-        
+
         send_metadata = dict(metadata or {})
         if target.thread_id and "thread_id" not in send_metadata:
             send_metadata["thread_id"] = target.thread_id
-        return await adapter.send(target.chat_id, content, metadata=send_metadata or None)
+
+        return await send_connected_text(
+            adapter,
+            chat_id=target.chat_id,
+            content=content,
+            metadata=send_metadata or None,
+        )
 
 
 def parse_deliver_spec(

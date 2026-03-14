@@ -13,6 +13,7 @@ Covers:
 """
 
 import os
+import asyncio
 import unittest
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -23,6 +24,8 @@ from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, AsyncMock
 
 from gateway.platforms.base import SendResult
+
+_REAL_ASYNCIO_RUN = asyncio.run
 
 
 class TestPlatformEnum(unittest.TestCase):
@@ -283,29 +286,79 @@ class TestAuthorizationMaps(unittest.TestCase):
 
 
 class TestSendMessageToolRouting(unittest.TestCase):
-    """Verify email routing in send_message_tool."""
+    """Verify email routing through the shared outbound service."""
 
-    def test_email_in_platform_map(self):
-        import tools.send_message_tool as smt
-        import inspect
-        source = inspect.getsource(smt._handle_send)
-        self.assertIn('"email"', source)
+    def test_email_sender_is_registered(self):
+        from gateway.config import Platform
+        from gateway.outbound import get_sender, resolve_platform_name
 
-    def test_send_to_platform_has_email_branch(self):
-        import tools.send_message_tool as smt
-        import inspect
-        source = inspect.getsource(smt._send_to_platform)
-        self.assertIn("Platform.EMAIL", source)
+        self.assertEqual(resolve_platform_name("email"), Platform.EMAIL)
+        self.assertEqual(get_sender(Platform.EMAIL).platform, Platform.EMAIL)
+
+    @patch("gateway.outbound.service.send_direct_text", new_callable=AsyncMock, return_value={"success": True})
+    @patch("model_tools._run_async", side_effect=lambda coro: _REAL_ASYNCIO_RUN(coro))
+    @patch("tools.interrupt.is_interrupted", return_value=False)
+    def test_send_message_uses_shared_outbound_service(self, _interrupt_mock, _run_async_mock, send_mock):
+        from gateway.config import Platform
+        from tools.send_message_tool import send_message_tool
+
+        email_cfg = SimpleNamespace(enabled=True, extra={"address": "hermes@test.com", "smtp_host": "smtp.test.com"})
+        config = SimpleNamespace(
+            platforms={Platform.EMAIL: email_cfg},
+            get_home_channel=lambda _platform: None,
+        )
+
+        with patch("gateway.config.load_gateway_config", return_value=config):
+            result = send_message_tool(
+                {
+                    "action": "send",
+                    "target": "email:user@test.com",
+                    "message": "Hello",
+                }
+            )
+
+        self.assertIn('"success": true', result.lower())
+        send_mock.assert_called_once_with(
+            Platform.EMAIL,
+            email_cfg,
+            "user@test.com",
+            "Hello",
+            metadata=None,
+            media_files=[],
+        )
 
 
 class TestCronDelivery(unittest.TestCase):
-    """Verify email in cron scheduler platform_map."""
+    """Verify email cron delivery uses the shared outbound service."""
 
-    def test_email_in_cron_platform_map(self):
-        import cron.scheduler
-        import inspect
-        source = inspect.getsource(cron.scheduler)
-        self.assertIn('"email"', source)
+    @patch("gateway.outbound.service.send_direct_text", new_callable=AsyncMock, return_value={"success": True})
+    @patch("asyncio.run", side_effect=lambda coro: _REAL_ASYNCIO_RUN(coro))
+    def test_email_cron_delivery_uses_outbound_service(self, _run_mock, send_mock):
+        from cron.scheduler import _deliver_result
+        from gateway.config import Platform
+
+        pconfig = SimpleNamespace(enabled=True, extra={"address": "hermes@test.com", "smtp_host": "smtp.test.com"})
+        config = SimpleNamespace(
+            platforms={Platform.EMAIL: pconfig},
+            get_home_channel=lambda _platform: None,
+        )
+
+        job = {
+            "id": "email-job",
+            "deliver": "origin",
+            "origin": {"platform": "email", "chat_id": "user@test.com"},
+        }
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("gateway.mirror.mirror_to_session"):
+            _deliver_result(job, "Hello")
+
+        send_mock.assert_called_once()
+        args, kwargs = send_mock.call_args
+        self.assertEqual(args[0], Platform.EMAIL)
+        self.assertEqual(args[1], pconfig)
+        self.assertEqual(args[2], "user@test.com")
+        self.assertEqual(args[3], "Hello")
 
 
 class TestToolset(unittest.TestCase):
@@ -998,7 +1051,7 @@ class TestPollLoop(unittest.TestCase):
 
 
 class TestSendEmailStandalone(unittest.TestCase):
-    """Test the standalone _send_email function in send_message_tool."""
+    """Test standalone email delivery via the outbound service."""
 
     @patch.dict(os.environ, {
         "EMAIL_ADDRESS": "hermes@test.com",
@@ -1007,17 +1060,24 @@ class TestSendEmailStandalone(unittest.TestCase):
         "EMAIL_SMTP_PORT": "587",
     })
     def test_send_email_tool_success(self):
-        """_send_email should use verified STARTTLS when sending."""
+        """Email direct send should use verified STARTTLS when sending."""
         import asyncio
         import ssl
-        from tools.send_message_tool import _send_email
+        from gateway.config import Platform, PlatformConfig
+        from gateway.outbound.service import send_direct_text
+
+        pconfig = PlatformConfig(
+            enabled=True,
+            token=None,
+            extra={"address": "hermes@test.com", "smtp_host": "smtp.test.com"},
+        )
 
         with patch("smtplib.SMTP") as mock_smtp:
             mock_server = MagicMock()
             mock_smtp.return_value = mock_server
 
             result = asyncio.run(
-                _send_email({"address": "hermes@test.com", "smtp_host": "smtp.test.com"}, "user@test.com", "Hello")
+                send_direct_text(Platform.EMAIL, pconfig, "user@test.com", "Hello")
             )
 
             self.assertTrue(result["success"])
@@ -1033,11 +1093,18 @@ class TestSendEmailStandalone(unittest.TestCase):
     def test_send_email_tool_failure(self):
         """SMTP failure should return error dict."""
         import asyncio
-        from tools.send_message_tool import _send_email
+        from gateway.config import Platform, PlatformConfig
+        from gateway.outbound.service import send_direct_text
+
+        pconfig = PlatformConfig(
+            enabled=True,
+            token=None,
+            extra={"address": "hermes@test.com", "smtp_host": "smtp.test.com"},
+        )
 
         with patch("smtplib.SMTP", side_effect=Exception("SMTP error")):
             result = asyncio.run(
-                _send_email({"address": "hermes@test.com", "smtp_host": "smtp.test.com"}, "user@test.com", "Hello")
+                send_direct_text(Platform.EMAIL, pconfig, "user@test.com", "Hello")
             )
 
             self.assertIn("error", result)
@@ -1047,10 +1114,13 @@ class TestSendEmailStandalone(unittest.TestCase):
     def test_send_email_tool_not_configured(self):
         """Missing config should return error."""
         import asyncio
-        from tools.send_message_tool import _send_email
+        from gateway.config import Platform, PlatformConfig
+        from gateway.outbound.service import send_direct_text
+
+        pconfig = PlatformConfig(enabled=True, token=None, extra={})
 
         result = asyncio.run(
-            _send_email({}, "user@test.com", "Hello")
+            send_direct_text(Platform.EMAIL, pconfig, "user@test.com", "Hello")
         )
 
         self.assertIn("error", result)

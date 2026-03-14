@@ -391,43 +391,16 @@ class HomeAssistantAdapter(BasePlatformAdapter):
         Uses the REST API instead of WebSocket to avoid a race condition
         with the event listener loop that reads from the same WS connection.
         """
-        url = f"{self._hass_url}/api/services/persistent_notification/create"
-        headers = {
-            "Authorization": f"Bearer {self._hass_token}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "title": "Hermes Agent",
-            "message": content[:self.MAX_MESSAGE_LENGTH],
-        }
-
         try:
-            if self._rest_session:
-                async with self._rest_session.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status < 300:
-                        return SendResult(success=True, message_id=uuid.uuid4().hex[:12])
-                    else:
-                        body = await resp.text()
-                        return SendResult(success=False, error=f"HTTP {resp.status}: {body}")
-            else:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        url,
-                        headers=headers,
-                        json=payload,
-                        timeout=aiohttp.ClientTimeout(total=10),
-                    ) as resp:
-                        if resp.status < 300:
-                            return SendResult(success=True, message_id=uuid.uuid4().hex[:12])
-                        else:
-                            body = await resp.text()
-                            return SendResult(success=False, error=f"HTTP {resp.status}: {body}")
+            from gateway.outbound.service import send_connected_text
 
+            return await send_connected_text(
+                self,
+                chat_id=str(chat_id),
+                content=content,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
         except asyncio.TimeoutError:
             return SendResult(success=False, error="Timeout sending notification to HA")
         except Exception as e:

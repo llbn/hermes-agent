@@ -66,32 +66,6 @@ def check_telegram_requirements() -> bool:
     return TELEGRAM_AVAILABLE
 
 
-# Matches every character that MarkdownV2 requires to be backslash-escaped
-# when it appears outside a code span or fenced code block.
-_MDV2_ESCAPE_RE = re.compile(r'([_*\[\]()~`>#\+\-=|{}.!\\])')
-
-
-def _escape_mdv2(text: str) -> str:
-    """Escape Telegram MarkdownV2 special characters with a preceding backslash."""
-    return _MDV2_ESCAPE_RE.sub(r'\\\1', text)
-
-
-def _strip_mdv2(text: str) -> str:
-    """Strip MarkdownV2 escape backslashes to produce clean plain text.
-
-    Also removes MarkdownV2 bold markers (*text* -> text) so the fallback
-    doesn't show stray asterisks from header/bold conversion.
-    """
-    # Remove escape backslashes before special characters
-    cleaned = re.sub(r'\\([_*\[\]()~`>#\+\-=|{}.!\\])', r'\1', text)
-    # Remove MarkdownV2 bold markers that format_message converted from **bold**
-    cleaned = re.sub(r'\*([^*]+)\*', r'\1', cleaned)
-    # Remove MarkdownV2 italic markers that format_message converted from *italic*
-    # Use word boundary (\b) to avoid breaking snake_case like my_variable_name
-    cleaned = re.sub(r'(?<!\w)_([^_]+)_(?!\w)', r'\1', cleaned)
-    return cleaned
-
-
 class TelegramAdapter(BasePlatformAdapter):
     """
     Telegram bot adapter.
@@ -315,54 +289,15 @@ class TelegramAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None
     ) -> SendResult:
         """Send a message to a Telegram chat."""
-        if not self._bot:
-            return SendResult(success=False, error="Not connected")
-        
-        try:
-            # Format and split message if needed
-            formatted = self.format_message(content)
-            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
-            
-            message_ids = []
-            thread_id = metadata.get("thread_id") if metadata else None
-            
-            for i, chunk in enumerate(chunks):
-                # Try Markdown first, fall back to plain text if it fails
-                try:
-                    msg = await self._bot.send_message(
-                        chat_id=int(chat_id),
-                        text=chunk,
-                        parse_mode=ParseMode.MARKDOWN_V2,
-                        reply_to_message_id=int(reply_to) if reply_to and i == 0 else None,
-                        message_thread_id=int(thread_id) if thread_id else None,
-                    )
-                except Exception as md_error:
-                    # Markdown parsing failed, try plain text
-                    if "parse" in str(md_error).lower() or "markdown" in str(md_error).lower():
-                        logger.warning("[%s] MarkdownV2 parse failed, falling back to plain text: %s", self.name, md_error)
-                        # Strip MDV2 escape backslashes so the user doesn't
-                        # see raw backslashes littered through the message.
-                        plain_chunk = _strip_mdv2(chunk)
-                        msg = await self._bot.send_message(
-                            chat_id=int(chat_id),
-                            text=plain_chunk,
-                            parse_mode=None,  # Plain text
-                            reply_to_message_id=int(reply_to) if reply_to and i == 0 else None,
-                            message_thread_id=int(thread_id) if thread_id else None,
-                        )
-                    else:
-                        raise  # Re-raise if not a parse error
-                message_ids.append(str(msg.message_id))
-            
-            return SendResult(
-                success=True,
-                message_id=message_ids[0] if message_ids else None,
-                raw_response={"message_ids": message_ids}
-            )
-            
-        except Exception as e:
-            logger.error("[%s] Failed to send Telegram message: %s", self.name, e, exc_info=True)
-            return SendResult(success=False, error=str(e))
+        from gateway.outbound.service import send_connected_text
+
+        return await send_connected_text(
+            self,
+            chat_id=str(chat_id),
+            content=content,
+            reply_to=reply_to,
+            metadata=metadata,
+        )
 
     async def edit_message(
         self,
@@ -374,22 +309,9 @@ class TelegramAdapter(BasePlatformAdapter):
         if not self._bot:
             return SendResult(success=False, error="Not connected")
         try:
-            formatted = self.format_message(content)
-            try:
-                await self._bot.edit_message_text(
-                    chat_id=int(chat_id),
-                    message_id=int(message_id),
-                    text=formatted,
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                )
-            except Exception:
-                # Fallback: retry without markdown formatting
-                await self._bot.edit_message_text(
-                    chat_id=int(chat_id),
-                    message_id=int(message_id),
-                    text=content,
-                )
-            return SendResult(success=True, message_id=message_id)
+            from gateway.outbound.telegram import edit_telegram_html
+
+            return await edit_telegram_html(self._bot, chat_id, message_id, content)
         except Exception as e:
             logger.error(
                 "[%s] Failed to edit Telegram message %s: %s",
@@ -688,84 +610,10 @@ class TelegramAdapter(BasePlatformAdapter):
             return {"name": str(chat_id), "type": "dm", "error": str(e)}
     
     def format_message(self, content: str) -> str:
-        """
-        Convert standard markdown to Telegram MarkdownV2 format.
+        """Convert standard markdown to Telegram HTML."""
+        from gateway.outbound.telegram import render_telegram_html
 
-        Protected regions (code blocks, inline code) are extracted first so
-        their contents are never modified.  Standard markdown constructs
-        (headers, bold, italic, links) are translated to MarkdownV2 syntax,
-        and all remaining special characters are escaped.
-        """
-        if not content:
-            return content
-
-        placeholders: dict = {}
-        counter = [0]
-
-        def _ph(value: str) -> str:
-            """Stash *value* behind a placeholder token that survives escaping."""
-            key = f"\x00PH{counter[0]}\x00"
-            counter[0] += 1
-            placeholders[key] = value
-            return key
-
-        text = content
-
-        # 1) Protect fenced code blocks (``` ... ```)
-        text = re.sub(
-            r'(```(?:[^\n]*\n)?[\s\S]*?```)',
-            lambda m: _ph(m.group(0)),
-            text,
-        )
-
-        # 2) Protect inline code (`...`)
-        text = re.sub(r'(`[^`]+`)', lambda m: _ph(m.group(0)), text)
-
-        # 3) Convert markdown links – escape the display text; inside the URL
-        #    only ')' and '\' need escaping per the MarkdownV2 spec.
-        def _convert_link(m):
-            display = _escape_mdv2(m.group(1))
-            url = m.group(2).replace('\\', '\\\\').replace(')', '\\)')
-            return _ph(f'[{display}]({url})')
-
-        text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', _convert_link, text)
-
-        # 4) Convert markdown headers (## Title) → bold *Title*
-        def _convert_header(m):
-            inner = m.group(1).strip()
-            # Strip redundant bold markers that may appear inside a header
-            inner = re.sub(r'\*\*(.+?)\*\*', r'\1', inner)
-            return _ph(f'*{_escape_mdv2(inner)}*')
-
-        text = re.sub(
-            r'^#{1,6}\s+(.+)$', _convert_header, text, flags=re.MULTILINE
-        )
-
-        # 5) Convert bold: **text** → *text* (MarkdownV2 bold)
-        text = re.sub(
-            r'\*\*(.+?)\*\*',
-            lambda m: _ph(f'*{_escape_mdv2(m.group(1))}*'),
-            text,
-        )
-
-        # 6) Convert italic: *text* (single asterisk) → _text_ (MarkdownV2 italic)
-        #    [^*\n]+ prevents matching across newlines (which would corrupt
-        #    bullet lists using * markers and multi-line content).
-        text = re.sub(
-            r'\*([^*\n]+)\*',
-            lambda m: _ph(f'_{_escape_mdv2(m.group(1))}_'),
-            text,
-        )
-
-        # 7) Escape remaining special characters in plain text
-        text = _escape_mdv2(text)
-
-        # 8) Restore placeholders in reverse insertion order so that
-        #    nested references (a placeholder inside another) resolve correctly.
-        for key in reversed(list(placeholders.keys())):
-            text = text.replace(key, placeholders[key])
-
-        return text
+        return render_telegram_html(content)
     
     async def _handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming text messages."""
