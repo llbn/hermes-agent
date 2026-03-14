@@ -34,11 +34,12 @@ Usage:
     hermes honcho identity                 # Show AI peer identity representation
     hermes honcho identity <file>          # Seed AI peer identity from a file (SOUL.md etc.)
     hermes honcho migrate                  # Step-by-step migration guide: OpenClaw native → Hermes + Honcho
-    hermes version             # Show version
-    hermes update              # Update to latest version
-    hermes uninstall           # Uninstall Hermes Agent
-    hermes sessions browse     # Interactive session picker with search
-    hermes claw migrate        # Migrate from OpenClaw to Hermes
+    hermes version             Show version
+    hermes update              Update to latest version
+    hermes uninstall           Uninstall Hermes Agent
+    hermes acp                 Run as an ACP server for editor integration
+    hermes sessions browse     Interactive session picker with search
+
     hermes claw migrate --dry-run  # Preview migration without changes
 """
 
@@ -68,11 +69,31 @@ os.environ.setdefault("MSWEA_GLOBAL_CONFIG_DIR", str(get_hermes_home()))
 os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 
 import logging
+import time as _time
+from datetime import datetime
 
 from hermes_cli import __version__, __release_date__
 from hermes_constants import OPENROUTER_BASE_URL
 
 logger = logging.getLogger(__name__)
+
+
+def _relative_time(ts) -> str:
+    """Format a timestamp as relative time (e.g., '2h ago', 'yesterday')."""
+    if not ts:
+        return "?"
+    delta = _time.time() - ts
+    if delta < 60:
+        return "just now"
+    if delta < 3600:
+        return f"{int(delta / 60)}m ago"
+    if delta < 86400:
+        return f"{int(delta / 3600)}h ago"
+    if delta < 172800:
+        return "yesterday"
+    if delta < 604800:
+        return f"{int(delta / 86400)}d ago"
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
 
 
 def _has_any_provider_configured() -> bool:
@@ -139,27 +160,8 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
     # Try curses-based picker first
     try:
         import curses
-        import time as _time
-        from datetime import datetime
 
         result_holder = [None]
-
-        def _relative_time(ts):
-            if not ts:
-                return "?"
-            delta = _time.time() - ts
-            if delta < 60:
-                return "just now"
-            elif delta < 3600:
-                return f"{int(delta / 60)}m ago"
-            elif delta < 86400:
-                return f"{int(delta / 3600)}h ago"
-            elif delta < 172800:
-                return "yesterday"
-            elif delta < 604800:
-                return f"{int(delta / 86400)}d ago"
-            else:
-                return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
 
         def _format_row(s, max_x):
             """Format a session row for display."""
@@ -351,26 +353,6 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
         pass
 
     # Fallback: numbered list (Windows without curses, etc.)
-    import time as _time
-    from datetime import datetime
-
-    def _relative_time_fb(ts):
-        if not ts:
-            return "?"
-        delta = _time.time() - ts
-        if delta < 60:
-            return "just now"
-        elif delta < 3600:
-            return f"{int(delta / 60)}m ago"
-        elif delta < 86400:
-            return f"{int(delta / 3600)}h ago"
-        elif delta < 172800:
-            return "yesterday"
-        elif delta < 604800:
-            return f"{int(delta / 86400)}d ago"
-        else:
-            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-
     print("\n  Browse sessions  (enter number to resume, q to cancel)\n")
     for i, s in enumerate(sessions):
         title = (s.get("title") or "").strip()
@@ -378,7 +360,7 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
         label = title or preview or s["id"]
         if len(label) > 50:
             label = label[:47] + "..."
-        last_active = _relative_time_fb(s.get("last_active"))
+        last_active = _relative_time(s.get("last_active"))
         src = s.get("source", "")[:6]
         print(f"  {i + 1:>3}. {label:<50}  {last_active:<10}  {src}")
 
@@ -477,6 +459,15 @@ def cmd_chat(args):
         print()
         print("  Run:  hermes setup")
         print()
+
+        from hermes_cli.setup import is_interactive_stdin, print_noninteractive_setup_guidance
+
+        if not is_interactive_stdin():
+            print_noninteractive_setup_guidance(
+                "No interactive TTY detected for the first-run setup prompt."
+            )
+            sys.exit(1)
+
         try:
             reply = input("Run setup now? [Y/n] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -745,8 +736,8 @@ def cmd_model(args):
         config_provider = model_cfg.get("provider")
 
     effective_provider = (
-        os.getenv("HERMES_INFERENCE_PROVIDER")
-        or config_provider
+        config_provider
+        or os.getenv("HERMES_INFERENCE_PROVIDER")
         or "auto"
     )
     try:
@@ -2836,30 +2827,6 @@ For more help on a command:
             if not sessions:
                 print("No sessions found.")
                 return
-            from datetime import datetime
-            import time as _time
-
-            def _relative_time(ts):
-                """Format a timestamp as relative time (e.g., '2h ago', 'yesterday')."""
-                if not ts:
-                    return "?"
-                delta = _time.time() - ts
-                if delta < 60:
-                    return "just now"
-                elif delta < 3600:
-                    mins = int(delta / 60)
-                    return f"{mins}m ago"
-                elif delta < 86400:
-                    hours = int(delta / 3600)
-                    return f"{hours}h ago"
-                elif delta < 172800:
-                    return "yesterday"
-                elif delta < 604800:
-                    days = int(delta / 86400)
-                    return f"{days}d ago"
-                else:
-                    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-
             has_titles = any(s.get("title") for s in sessions)
             if has_titles:
                 print(f"{'Title':<22} {'Preview':<40} {'Last Active':<13} {'ID'}")
@@ -3102,6 +3069,27 @@ For more help on a command:
         help="Skip confirmation prompts"
     )
     uninstall_parser.set_defaults(func=cmd_uninstall)
+
+    # =========================================================================
+    # acp command
+    # =========================================================================
+    acp_parser = subparsers.add_parser(
+        "acp",
+        help="Run Hermes Agent as an ACP (Agent Client Protocol) server",
+        description="Start Hermes Agent in ACP mode for editor integration (VS Code, Zed, JetBrains)",
+    )
+
+    def cmd_acp(args):
+        """Launch Hermes Agent as an ACP server."""
+        try:
+            from acp_adapter.entry import main as acp_main
+            acp_main()
+        except ImportError:
+            print("ACP dependencies not installed.")
+            print("Install them with:  pip install -e '.[acp]'")
+            sys.exit(1)
+
+    acp_parser.set_defaults(func=cmd_acp)
     
     # =========================================================================
     # Parse and execute

@@ -404,8 +404,10 @@ except Exception:
 
 from rich import box as rich_box
 from rich.console import Console
+from rich.markup import escape as _escape
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text as _RichText
 
 import fire
 
@@ -696,6 +698,24 @@ _BOLD = "\033[1m"
 _DIM = "\033[2m"
 _RST = "\033[0m"
 
+def _accent_hex() -> str:
+    """Return the active skin accent color for legacy CLI output lines."""
+    try:
+        from hermes_cli.skin_engine import get_active_skin
+        return get_active_skin().get_color("ui_accent", "#FFBF00")
+    except Exception:
+        return "#FFBF00"
+
+
+def _rich_text_from_ansi(text: str) -> _RichText:
+    """Safely render assistant/tool output that may contain ANSI escapes.
+
+    Using Rich Text.from_ansi preserves literal bracketed text like
+    ``[not markup]`` while still interpreting real ANSI color codes.
+    """
+    return _RichText.from_ansi(text or "")
+
+
 def _cprint(text: str):
     """Print ANSI-colored text through prompt_toolkit's native renderer.
 
@@ -718,7 +738,12 @@ class ChatConsole:
     def __init__(self):
         from io import StringIO
         self._buffer = StringIO()
-        self._inner = Console(file=self._buffer, force_terminal=True, highlight=False)
+        self._inner = Console(
+            file=self._buffer,
+            force_terminal=True,
+            color_system="truecolor",
+            highlight=False,
+        )
 
     def print(self, *args, **kwargs):
         self._buffer.seek(0)
@@ -1151,8 +1176,8 @@ class HermesCLI:
         # Provider selection is resolved lazily at use-time via _ensure_runtime_credentials().
         self.requested_provider = (
             provider
-            or os.getenv("HERMES_INFERENCE_PROVIDER")
             or CLI_CONFIG["model"].get("provider")
+            or os.getenv("HERMES_INFERENCE_PROVIDER")
             or "auto"
         )
         self._provider_source: Optional[str] = None
@@ -1472,13 +1497,16 @@ class HermesCLI:
                 title_part = ""
                 if session_meta.get("title"):
                     title_part = f" \"{session_meta['title']}\""
-                _cprint(
-                    f"{_GOLD}↻ Resumed session {_BOLD}{self.session_id}{_RST}{_GOLD}{title_part} "
-                    f"({msg_count} user message{'s' if msg_count != 1 else ''}, "
-                    f"{len(restored)} total messages){_RST}"
+                ChatConsole().print(
+                    f"[bold {_accent_hex()}]↻ Resumed session[/] "
+                    f"[bold]{_escape(self.session_id)}[/]"
+                    f"[bold {_accent_hex()}]{_escape(title_part)}[/] "
+                    f"({msg_count} user message{'s' if msg_count != 1 else ''}, {len(restored)} total messages)"
                 )
             else:
-                _cprint(f"{_GOLD}Session {self.session_id} found but has no messages. Starting fresh.{_RST}")
+                ChatConsole().print(
+                    f"[bold {_accent_hex()}]Session {_escape(self.session_id)} found but has no messages. Starting fresh.[/]"
+                )
             # Re-open the session (clear ended_at so it's active again)
             try:
                 self._session_db._conn.execute(
@@ -1738,6 +1766,19 @@ class HermesCLI:
         from rich.panel import Panel
         from rich.text import Text
 
+        try:
+            from hermes_cli.skin_engine import get_active_skin
+            _skin = get_active_skin()
+            _history_text_c = _skin.get_color("banner_text", "#FFF8DC")
+            _session_label_c = _skin.get_color("session_label", "#DAA520")
+            _session_border_c = _skin.get_color("session_border", "#8B8682")
+            _assistant_label_c = _skin.get_color("ui_ok", "#8FBC8F")
+        except Exception:
+            _history_text_c = "#FFF8DC"
+            _session_label_c = "#DAA520"
+            _session_border_c = "#8B8682"
+            _assistant_label_c = "#8FBC8F"
+
         lines = Text()
         if skipped:
             lines.append(
@@ -1747,14 +1788,14 @@ class HermesCLI:
 
         for i, (role, text) in enumerate(entries):
             if role == "user":
-                lines.append("  ● You: ", style="dim bold #DAA520")
+                lines.append("  ● You: ", style=f"dim bold {_session_label_c}")
                 # Show first line inline, indent rest
                 msg_lines = text.splitlines()
                 lines.append(msg_lines[0] + "\n", style="dim")
                 for ml in msg_lines[1:]:
                     lines.append(f"         {ml}\n", style="dim")
             else:
-                lines.append("  ◆ Hermes: ", style="dim bold #8FBC8F")
+                lines.append("  ◆ Hermes: ", style=f"dim bold {_assistant_label_c}")
                 msg_lines = text.splitlines()
                 lines.append(msg_lines[0] + "\n", style="dim")
                 for ml in msg_lines[1:]:
@@ -1764,9 +1805,10 @@ class HermesCLI:
 
         panel = Panel(
             lines,
-            title="[dim #DAA520]Previous Conversation[/]",
-            border_style="dim #8B8682",
+            title=f"[dim {_session_label_c}]Previous Conversation[/]",
+            border_style=f"dim {_session_border_c}",
             padding=(0, 1),
+            style=_history_text_c,
         )
         self.console.print(panel)
 
@@ -1976,19 +2018,30 @@ class HermesCLI:
         """Display help information with categorized commands."""
         from hermes_cli.commands import COMMANDS_BY_CATEGORY
 
-        _cprint(f"\n{_BOLD}+{'-' * 55}+{_RST}")
-        _cprint(f"{_BOLD}|{' ' * 14}(^_^)? Available Commands{' ' * 15}|{_RST}")
-        _cprint(f"{_BOLD}+{'-' * 55}+{_RST}")
+        try:
+            from hermes_cli.skin_engine import get_active_help_header
+            header = get_active_help_header("(^_^)? Available Commands")
+        except Exception:
+            header = "(^_^)? Available Commands"
+        header = (header or "").strip() or "(^_^)? Available Commands"
+        inner_width = 55
+        if len(header) > inner_width:
+            header = header[:inner_width]
+        _cprint(f"\n{_BOLD}+{'-' * inner_width}+{_RST}")
+        _cprint(f"{_BOLD}|{header:^{inner_width}}|{_RST}")
+        _cprint(f"{_BOLD}+{'-' * inner_width}+{_RST}")
 
         for category, commands in COMMANDS_BY_CATEGORY.items():
             _cprint(f"\n  {_BOLD}── {category} ──{_RST}")
             for cmd, desc in commands.items():
-                _cprint(f"    {_GOLD}{cmd:<15}{_RST} {_DIM}-{_RST} {desc}")
+                ChatConsole().print(f"    [bold {_accent_hex()}]{cmd:<15}[/] [dim]-[/] {_escape(desc)}")
 
         if _skill_commands:
             _cprint(f"\n  ⚡ {_BOLD}Skill Commands{_RST} ({len(_skill_commands)} installed):")
             for cmd, info in sorted(_skill_commands.items()):
-                _cprint(f"    {_GOLD}{cmd:<22}{_RST} {_DIM}-{_RST} {info['description']}")
+                ChatConsole().print(
+                    f"    [bold {_accent_hex()}]{cmd:<22}[/] [dim]-[/] {_escape(info['description'])}"
+                )
 
         _cprint(f"\n  {_DIM}Tip: Just type your message to chat with Hermes!{_RST}")
         _cprint(f"  {_DIM}Multi-line: Alt+Enter for a new line{_RST}")
@@ -2981,8 +3034,7 @@ class HermesCLI:
                             )
                             output = result.stdout.strip() or result.stderr.strip()
                             if output:
-                                from rich.text import Text as _RichText
-                                self.console.print(_RichText.from_ansi(output))
+                                self.console.print(_rich_text_from_ansi(output))
                             else:
                                 self.console.print("[dim]Command returned no output[/]")
                         except subprocess.TimeoutExpired:
@@ -3076,27 +3128,29 @@ class HermesCLI:
 
                 # Display result in the CLI (thread-safe via patch_stdout)
                 print()
-                _cprint(f"{_GOLD}{'─' * 40}{_RST}")
+                ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
                 _cprint(f"  ✅ Background task #{task_num} complete")
                 _cprint(f"  Prompt: \"{prompt[:60]}{'...' if len(prompt) > 60 else ''}\"")
-                _cprint(f"{_GOLD}{'─' * 40}{_RST}")
+                ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
                 if response:
                     try:
                         from hermes_cli.skin_engine import get_active_skin
                         _skin = get_active_skin()
                         label = _skin.get_branding("response_label", "⚕ Hermes")
                         _resp_color = _skin.get_color("response_border", "#CD7F32")
+                        _resp_text = _skin.get_color("banner_text", "#FFF8DC")
                     except Exception:
                         label = "⚕ Hermes"
                         _resp_color = "#CD7F32"
+                        _resp_text = "#FFF8DC"
 
-                    from rich.text import Text as _RichText
                     _chat_console = ChatConsole()
                     _chat_console.print(Panel(
-                        _RichText.from_ansi(response),
-                        title=f"[bold]{label} (background #{task_num})[/bold]",
+                        _rich_text_from_ansi(response),
+                        title=f"[{_resp_color} bold]{label} (background #{task_num})[/]",
                         title_align="left",
                         border_style=_resp_color,
+                        style=_resp_text,
                         box=rich_box.HORIZONTALS,
                         padding=(1, 2),
                     ))
@@ -3156,6 +3210,8 @@ class HermesCLI:
         else:
             print(f"  Skin set to: {new_skin}")
         print("  Note: banner colors will update on next session start.")
+        if self._apply_tui_skin_style():
+            print("  Prompt + TUI colors updated.")
 
     def _toggle_verbose(self):
         """Cycle tool progress mode: off → new → all → verbose → off."""
@@ -3565,54 +3621,59 @@ class HermesCLI:
         _cprint(f"\n{_DIM}  ⏱ Timeout — continuing without sudo{_RST}")
         return ""
 
-    def _approval_callback(self, command: str, description: str) -> str:
+    def _approval_callback(self, command: str, description: str,
+                           *, allow_permanent: bool = True) -> str:
         """
         Prompt for dangerous command approval through the prompt_toolkit UI.
-        
+
         Called from the agent thread. Shows a selection UI similar to clarify
-        with choices: once / session / always / deny.
+        with choices: once / session / always / deny. When allow_permanent
+        is False (tirith warnings present), the 'always' option is hidden.
+
+        Uses _approval_lock to serialize concurrent requests (e.g. from
+        parallel delegation subtasks) so each prompt gets its own turn
+        and the shared _approval_state / _approval_deadline aren't clobbered.
         """
         import time as _time
 
-        timeout = 60
-        response_queue = queue.Queue()
-        choices = ["once", "session", "always", "deny"]
+        with self._approval_lock:
+            timeout = 60
+            response_queue = queue.Queue()
+            choices = ["once", "session", "always", "deny"] if allow_permanent else ["once", "session", "deny"]
 
-        self._approval_state = {
-            "command": command,
-            "description": description,
-            "choices": choices,
-            "selected": 0,
-            "response_queue": response_queue,
-        }
-        self._approval_deadline = _time.monotonic() + timeout
+            self._approval_state = {
+                "command": command,
+                "description": description,
+                "choices": choices,
+                "selected": 0,
+                "response_queue": response_queue,
+            }
+            self._approval_deadline = _time.monotonic() + timeout
 
-        self._invalidate()
+            self._invalidate()
 
-        # Same throttled countdown as _clarify_callback — repaint only
-        # every 5 s to avoid flicker in Kitty / ghostty / etc.
-        _last_countdown_refresh = _time.monotonic()
-        while True:
-            try:
-                result = response_queue.get(timeout=1)
-                self._approval_state = None
-                self._approval_deadline = 0
-                self._invalidate()
-                return result
-            except queue.Empty:
-                remaining = self._approval_deadline - _time.monotonic()
-                if remaining <= 0:
-                    break
-                now = _time.monotonic()
-                if now - _last_countdown_refresh >= 5.0:
-                    _last_countdown_refresh = now
+            _last_countdown_refresh = _time.monotonic()
+            while True:
+                try:
+                    result = response_queue.get(timeout=1)
+                    self._approval_state = None
+                    self._approval_deadline = 0
                     self._invalidate()
+                    return result
+                except queue.Empty:
+                    remaining = self._approval_deadline - _time.monotonic()
+                    if remaining <= 0:
+                        break
+                    now = _time.monotonic()
+                    if now - _last_countdown_refresh >= 5.0:
+                        _last_countdown_refresh = now
+                        self._invalidate()
 
-        self._approval_state = None
-        self._approval_deadline = 0
-        self._invalidate()
-        _cprint(f"\n{_DIM}  ⏱ Timeout — denying command{_RST}")
-        return "deny"
+            self._approval_state = None
+            self._approval_deadline = 0
+            self._invalidate()
+            _cprint(f"\n{_DIM}  ⏱ Timeout — denying command{_RST}")
+            return "deny"
 
     def _secret_capture_callback(self, var_name: str, prompt: str, metadata=None) -> dict:
         return prompt_for_secret(self, var_name, prompt, metadata)
@@ -3684,8 +3745,8 @@ class HermesCLI:
 
         # Add user message to history
         self.conversation_history.append({"role": "user", "content": message})
-        
-        _cprint(f"{_GOLD}{'─' * 40}{_RST}")
+
+        ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
         print(flush=True)
         
         try:
@@ -3798,17 +3859,19 @@ class HermesCLI:
                     _skin = get_active_skin()
                     label = _skin.get_branding("response_label", "⚕ Hermes")
                     _resp_color = _skin.get_color("response_border", "#CD7F32")
+                    _resp_text = _skin.get_color("banner_text", "#FFF8DC")
                 except Exception:
                     label = "⚕ Hermes"
                     _resp_color = "#CD7F32"
+                    _resp_text = "#FFF8DC"
 
-                from rich.text import Text as _RichText
                 _chat_console = ChatConsole()
                 _chat_console.print(Panel(
-                    _RichText.from_ansi(response),
-                    title=f"[bold]{label}[/bold]",
+                    _rich_text_from_ansi(response),
+                    title=f"[{_resp_color} bold]{label}[/]",
                     title_align="left",
                     border_style=_resp_color,
+                    style=_resp_text,
                     box=rich_box.HORIZONTALS,
                     padding=(1, 2),
                 ))
@@ -3864,7 +3927,80 @@ class HermesCLI:
             print(f"Duration:       {duration_str}")
             print(f"Messages:       {msg_count} ({user_msgs} user, {tool_calls} tool calls)")
         else:
-            print("Goodbye! ⚕")
+            try:
+                from hermes_cli.skin_engine import get_active_goodbye
+                goodbye = get_active_goodbye("Goodbye! ⚕")
+            except Exception:
+                goodbye = "Goodbye! ⚕"
+            print(goodbye)
+
+    def _get_tui_prompt_symbols(self) -> tuple[str, str]:
+        """Return ``(normal_prompt, state_suffix)`` for the active skin.
+
+        ``normal_prompt`` is the full ``branding.prompt_symbol``.
+        ``state_suffix`` is what special states (sudo/secret/approval/agent)
+        should render after their leading icon.
+        """
+        try:
+            from hermes_cli.skin_engine import get_active_prompt_symbol
+            symbol = get_active_prompt_symbol("❯ ")
+        except Exception:
+            symbol = "❯ "
+
+        symbol = (symbol or "❯ ").rstrip() + " "
+        stripped = symbol.rstrip()
+        if not stripped:
+            return "❯ ", "❯ "
+
+        parts = stripped.split()
+        candidate = parts[-1] if parts else ""
+        arrow_chars = ("❯", ">", "$", "#", "›", "»", "→")
+        if any(ch in candidate for ch in arrow_chars):
+            return symbol, candidate.rstrip() + " "
+
+        # Icon-only custom prompts should still remain visible in special states.
+        return symbol, symbol
+
+    def _get_tui_prompt_fragments(self):
+        """Return the prompt_toolkit fragments for the current interactive state."""
+        symbol, state_suffix = self._get_tui_prompt_symbols()
+        if self._sudo_state:
+            return [("class:sudo-prompt", f"🔐 {state_suffix}")]
+        if self._secret_state:
+            return [("class:sudo-prompt", f"🔑 {state_suffix}")]
+        if self._approval_state:
+            return [("class:prompt-working", f"⚠ {state_suffix}")]
+        if self._clarify_freetext:
+            return [("class:clarify-selected", f"✎ {state_suffix}")]
+        if self._clarify_state:
+            return [("class:prompt-working", f"? {state_suffix}")]
+        if self._command_running:
+            return [("class:prompt-working", f"{self._command_spinner_frame()} {state_suffix}")]
+        if self._agent_running:
+            return [("class:prompt-working", f"⚕ {state_suffix}")]
+        return [("class:prompt", symbol)]
+
+    def _get_tui_prompt_text(self) -> str:
+        """Return the visible prompt text for width calculations."""
+        return "".join(text for _, text in self._get_tui_prompt_fragments())
+
+    def _build_tui_style_dict(self) -> dict[str, str]:
+        """Layer the active skin's prompt_toolkit colors over the base TUI style."""
+        style_dict = dict(getattr(self, "_tui_style_base", {}) or {})
+        try:
+            from hermes_cli.skin_engine import get_prompt_toolkit_style_overrides
+            style_dict.update(get_prompt_toolkit_style_overrides())
+        except Exception:
+            pass
+        return style_dict
+
+    def _apply_tui_skin_style(self) -> bool:
+        """Refresh prompt_toolkit styling for a running interactive TUI."""
+        if not getattr(self, "_app", None) or not getattr(self, "_tui_style_base", None):
+            return False
+        self._app.style = PTStyle.from_dict(self._build_tui_style_dict())
+        self._invalidate(min_interval=0.0)
+        return True
 
     def run(self):
         """Run the interactive CLI loop with persistent input at bottom."""
@@ -3920,6 +4056,7 @@ class HermesCLI:
         # Dangerous command approval state (similar mechanism to clarify)
         self._approval_state = None     # dict with command, description, choices, selected, response_queue
         self._approval_deadline = 0
+        self._approval_lock = threading.Lock()  # serialize concurrent approval prompts (delegation race fix)
 
         # Slash command loading state
         self._command_running = False
@@ -3937,6 +4074,13 @@ class HermesCLI:
         set_sudo_password_callback(self._sudo_password_callback)
         set_approval_callback(self._approval_callback)
         set_secret_capture_callback(self._secret_capture_callback)
+
+        # Ensure tirith security scanner is available (downloads if needed)
+        try:
+            from tools.tirith_security import ensure_installed
+            ensure_installed()
+        except Exception:
+            pass  # Non-fatal — fail-open at scan time if unavailable
         
         # Key bindings for the input area
         kb = KeyBindings()
@@ -4228,21 +4372,7 @@ class HermesCLI:
         cli_ref = self
 
         def get_prompt():
-            if cli_ref._sudo_state:
-                return [('class:sudo-prompt', '🔐 ❯ ')]
-            if cli_ref._secret_state:
-                return [('class:sudo-prompt', '🔑 ❯ ')]
-            if cli_ref._approval_state:
-                return [('class:prompt-working', '⚠ ❯ ')]
-            if cli_ref._clarify_freetext:
-                return [('class:clarify-selected', '✎ ❯ ')]
-            if cli_ref._clarify_state:
-                return [('class:prompt-working', '? ❯ ')]
-            if cli_ref._command_running:
-                return [('class:prompt-working', f"{cli_ref._command_spinner_frame()} ❯ ")]
-            if cli_ref._agent_running:
-                return [('class:prompt-working', '⚕ ❯ ')]
-            return [('class:prompt', '❯ ')]
+            return cli_ref._get_tui_prompt_fragments()
 
         # Create the input area with multiline (shift+enter), autocomplete, and paste handling
         input_area = TextArea(
@@ -4259,11 +4389,11 @@ class HermesCLI:
 
         # Dynamic height: accounts for both explicit newlines AND visual
         # wrapping of long lines so the input area always fits its content.
-        # The prompt characters ("❯ " etc.) consume ~4 columns.
         def _input_height():
             try:
                 doc = input_area.buffer.document
-                available_width = shutil.get_terminal_size().columns - 4  # subtract prompt width
+                prompt_width = max(2, len(self._get_tui_prompt_text()))
+                available_width = shutil.get_terminal_size().columns - prompt_width
                 if available_width < 10:
                     available_width = 40
                 visual_lines = 0
@@ -4704,7 +4834,7 @@ class HermesCLI:
         )
         
         # Style for the application
-        style = PTStyle.from_dict({
+        self._tui_style_base = {
             'input-area': '#FFF8DC',
             'placeholder': '#555555 italic',
             'prompt': '#FFF8DC',
@@ -4739,7 +4869,8 @@ class HermesCLI:
             'approval-cmd': '#AAAAAA italic',
             'approval-choice': '#AAAAAA',
             'approval-selected': '#FFD700 bold',
-        })
+        }
+        style = PTStyle.from_dict(self._build_tui_style_dict())
         
         # Create the application
         app = Application(
@@ -4802,20 +4933,25 @@ class HermesCLI:
                             full_text = paste_path.read_text(encoding="utf-8")
                             line_count = full_text.count('\n') + 1
                             print()
-                            _cprint(f"{_GOLD}●{_RST} {_BOLD}[Pasted text: {line_count} lines]{_RST}")
+                            ChatConsole().print(
+                                f"[bold {_accent_hex()}]●[/] [bold]{_escape(f'[Pasted text: {line_count} lines]')}[/]"
+                            )
                             user_input = full_text
                         else:
                             print()
-                            _cprint(f"{_GOLD}●{_RST} {_BOLD}{user_input}{_RST}")
+                            ChatConsole().print(f"[bold {_accent_hex()}]●[/] [bold]{_escape(user_input)}[/]")
                     else:
                         if '\n' in user_input:
                             first_line = user_input.split('\n')[0]
                             line_count = user_input.count('\n') + 1
                             print()
-                            _cprint(f"{_GOLD}●{_RST} {_BOLD}{first_line}{_RST} {_DIM}(+{line_count - 1} lines){_RST}")
+                            ChatConsole().print(
+                                f"[bold {_accent_hex()}]●[/] [bold]{_escape(first_line)}[/] "
+                                f"[dim](+{line_count - 1} lines)[/]"
+                            )
                         else:
                             print()
-                            _cprint(f"{_GOLD}●{_RST} {_BOLD}{user_input}{_RST}")
+                            ChatConsole().print(f"[bold {_accent_hex()}]●[/] [bold]{_escape(user_input)}[/]")
                     
                     # Show image attachment count
                     if submit_images:

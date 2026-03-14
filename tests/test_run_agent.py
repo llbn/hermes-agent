@@ -6,13 +6,17 @@ are made.
 """
 
 import json
+import logging
 import re
 import uuid
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+import run_agent
 from honcho_integration.client import HonchoClientConfig
 from run_agent import AIAgent, _inject_honcho_turn_context
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
@@ -70,13 +74,67 @@ def agent_with_memory_tool():
         patch("run_agent.OpenAI"),
     ):
         a = AIAgent(
-            api_key="test-key-1234567890",
+            api_key="test-k...7890",
             quiet_mode=True,
             skip_context_files=True,
             skip_memory=True,
         )
         a.client = MagicMock()
         return a
+
+
+def test_aiagent_reuses_existing_errors_log_handler():
+    """Repeated AIAgent init should not accumulate duplicate errors.log handlers."""
+    root_logger = logging.getLogger()
+    original_handlers = list(root_logger.handlers)
+    error_log_path = (run_agent._hermes_home / "logs" / "errors.log").resolve()
+
+    try:
+        for handler in list(root_logger.handlers):
+            root_logger.removeHandler(handler)
+
+        error_log_path.parent.mkdir(parents=True, exist_ok=True)
+        preexisting_handler = RotatingFileHandler(
+            error_log_path,
+            maxBytes=2 * 1024 * 1024,
+            backupCount=2,
+        )
+        root_logger.addHandler(preexisting_handler)
+
+        with (
+            patch(
+                "run_agent.get_tool_definitions",
+                return_value=_make_tool_defs("web_search"),
+            ),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            AIAgent(
+                api_key="test-k...7890",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            AIAgent(
+                api_key="test-k...7890",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        matching_handlers = [
+            handler for handler in root_logger.handlers
+            if isinstance(handler, RotatingFileHandler)
+            and error_log_path == Path(handler.baseFilename).resolve()
+        ]
+        assert len(matching_handlers) == 1
+    finally:
+        for handler in list(root_logger.handlers):
+            root_logger.removeHandler(handler)
+            if handler not in original_handlers:
+                handler.close()
+        for handler in original_handlers:
+            root_logger.addHandler(handler)
 
 
 # ---------------------------------------------------------------------------
@@ -1800,12 +1858,13 @@ class TestSafeWriter:
             sys.stdout = original
 
     def test_installed_in_run_conversation(self, agent):
-        """run_conversation installs _SafeWriter on sys.stdout."""
+        """run_conversation installs _SafeWriter on stdio."""
         import sys
         from run_agent import _SafeWriter
         resp = _mock_response(content="Done", finish_reason="stop")
         agent.client.chat.completions.create.return_value = resp
-        original = sys.stdout
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
         try:
             with (
                 patch.object(agent, "_persist_session"),
@@ -1814,6 +1873,41 @@ class TestSafeWriter:
             ):
                 agent.run_conversation("test")
             assert isinstance(sys.stdout, _SafeWriter)
+            assert isinstance(sys.stderr, _SafeWriter)
+        finally:
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
+
+    def test_installed_before_init_time_honcho_error_prints(self):
+        """AIAgent.__init__ wraps stdout before Honcho fallback prints can fire."""
+        import sys
+        from run_agent import _SafeWriter
+
+        broken = MagicMock()
+        broken.write.side_effect = OSError(5, "Input/output error")
+        broken.flush.side_effect = OSError(5, "Input/output error")
+
+        original = sys.stdout
+        sys.stdout = broken
+        try:
+            hcfg = HonchoClientConfig(enabled=True, api_key="test-honcho-key")
+            with (
+                patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+                patch("run_agent.check_toolset_requirements", return_value={}),
+                patch("run_agent.OpenAI"),
+                patch("hermes_cli.config.load_config", return_value={"memory": {}}),
+                patch("honcho_integration.client.HonchoClientConfig.from_global_config", return_value=hcfg),
+                patch("honcho_integration.client.get_honcho_client", side_effect=RuntimeError("boom")),
+            ):
+                agent = AIAgent(
+                    api_key="test-k...7890",
+                    quiet_mode=True,
+                    skip_context_files=True,
+                    skip_memory=False,
+                )
+
+            assert isinstance(sys.stdout, _SafeWriter)
+            assert agent._honcho is None
         finally:
             sys.stdout = original
 
@@ -1832,6 +1926,24 @@ class TestSafeWriter:
         # Still just one layer
         wrapped.write("test")
         assert inner.getvalue() == "test"
+
+
+class TestSaveSessionLogAtomicWrite:
+    def test_uses_shared_atomic_json_helper(self, agent, tmp_path):
+        agent.session_log_file = tmp_path / "session.json"
+        messages = [{"role": "user", "content": "hello"}]
+
+        with patch("run_agent.atomic_json_write", create=True) as mock_atomic_write:
+            agent._save_session_log(messages)
+
+        mock_atomic_write.assert_called_once()
+        call_args = mock_atomic_write.call_args
+        assert call_args.args[0] == agent.session_log_file
+        payload = call_args.args[1]
+        assert payload["session_id"] == agent.session_id
+        assert payload["messages"] == messages
+        assert call_args.kwargs["indent"] == 2
+        assert call_args.kwargs["default"] is str
 
 
 # ===================================================================

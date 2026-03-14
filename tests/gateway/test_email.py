@@ -849,12 +849,14 @@ class TestConnectDisconnect(unittest.TestCase):
 
     def test_disconnect_cancels_poll(self):
         """disconnect() should cancel the polling task."""
-        import asyncio
         adapter = self._make_adapter()
         adapter._running = True
-        adapter._poll_task = asyncio.ensure_future(asyncio.sleep(100))
 
-        _run_async(adapter.disconnect())
+        async def _exercise_disconnect():
+            adapter._poll_task = asyncio.create_task(asyncio.sleep(100))
+            await adapter.disconnect()
+
+        _run_async(_exercise_disconnect())
 
         self.assertFalse(adapter._running)
         self.assertIsNone(adapter._poll_task)
