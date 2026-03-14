@@ -199,48 +199,16 @@ class DiscordAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None
     ) -> SendResult:
         """Send a message to a Discord channel."""
-        if not self._client:
-            return SendResult(success=False, error="Not connected")
-        
-        try:
-            # Get the channel
-            channel = self._client.get_channel(int(chat_id))
-            if not channel:
-                channel = await self._client.fetch_channel(int(chat_id))
-            
-            if not channel:
-                return SendResult(success=False, error=f"Channel {chat_id} not found")
-            
-            # Format and split message if needed
-            formatted = self.format_message(content)
-            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
-            
-            message_ids = []
-            reference = None
-            
-            if reply_to:
-                try:
-                    ref_msg = await channel.fetch_message(int(reply_to))
-                    reference = ref_msg
-                except Exception as e:
-                    logger.debug("Could not fetch reply-to message: %s", e)
-            
-            for i, chunk in enumerate(chunks):
-                msg = await channel.send(
-                    content=chunk,
-                    reference=reference if i == 0 else None,
-                )
-                message_ids.append(str(msg.id))
-            
-            return SendResult(
-                success=True,
-                message_id=message_ids[0] if message_ids else None,
-                raw_response={"message_ids": message_ids}
-            )
-            
-        except Exception as e:  # pragma: no cover - defensive logging
-            logger.error("[%s] Failed to send Discord message: %s", self.name, e, exc_info=True)
-            return SendResult(success=False, error=str(e))
+        from gateway.outbound.service import send_discord_text
+
+        return await send_discord_text(
+            self.config,
+            chat_id,
+            content,
+            reply_to=reply_to,
+            metadata=metadata,
+            adapter=self,
+        )
 
     async def edit_message(
         self,

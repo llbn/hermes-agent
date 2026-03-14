@@ -60,8 +60,8 @@ def _deliver_result(job: dict, content: str) -> None:
     """
     Deliver job output to the configured target (origin chat, specific platform, etc.).
 
-    Uses the standalone platform send functions from send_message_tool so delivery
-    works whether or not the gateway is running.
+    Uses the shared outbound service so delivery behavior matches the platform's
+    adapter-specific formatting and chunking whether or not the gateway is running.
     """
     deliver = job.get("deliver", "local")
     origin = _resolve_origin(job)
@@ -69,7 +69,17 @@ def _deliver_result(job: dict, content: str) -> None:
     if deliver == "local":
         return
 
+    from gateway.config import load_gateway_config
+    from gateway.outbound.service import resolve_outbound_platform, send_text
+
+    try:
+        config = load_gateway_config()
+    except Exception as e:
+        logger.error("Job '%s': failed to load gateway config for delivery: %s", job["id"], e)
+        return
+
     thread_id = None
+    platform = None
 
     # Resolve target platform + chat_id
     if deliver == "origin":
@@ -77,43 +87,32 @@ def _deliver_result(job: dict, content: str) -> None:
             logger.warning("Job '%s' deliver=origin but no origin stored, skipping delivery", job["id"])
             return
         platform_name = origin["platform"]
+        platform = resolve_outbound_platform(platform_name)
         chat_id = origin["chat_id"]
         thread_id = origin.get("thread_id")
     elif ":" in deliver:
         platform_name, chat_id = deliver.split(":", 1)
+        platform = resolve_outbound_platform(platform_name)
     else:
         # Bare platform name like "telegram" — need to resolve to origin or home channel
         platform_name = deliver
+        platform = resolve_outbound_platform(platform_name)
         if origin and origin.get("platform") == platform_name:
             chat_id = origin["chat_id"]
             thread_id = origin.get("thread_id")
         else:
-            # Fall back to home channel
-            chat_id = os.getenv(f"{platform_name.upper()}_HOME_CHANNEL", "")
+            # Fall back to configured home channel
+            if not platform:
+                logger.warning("Job '%s': unknown platform '%s' for delivery", job["id"], platform_name)
+                return
+            home = config.get_home_channel(platform)
+            chat_id = home.chat_id if home else ""
             if not chat_id:
                 logger.warning("Job '%s' deliver=%s but no chat_id or home channel. Set via: hermes config set %s_HOME_CHANNEL <channel_id>", job["id"], deliver, platform_name.upper())
                 return
 
-    from tools.send_message_tool import _send_to_platform
-    from gateway.config import load_gateway_config, Platform
-
-    platform_map = {
-        "telegram": Platform.TELEGRAM,
-        "discord": Platform.DISCORD,
-        "slack": Platform.SLACK,
-        "whatsapp": Platform.WHATSAPP,
-        "signal": Platform.SIGNAL,
-        "email": Platform.EMAIL,
-    }
-    platform = platform_map.get(platform_name.lower())
     if not platform:
         logger.warning("Job '%s': unknown platform '%s' for delivery", job["id"], platform_name)
-        return
-
-    try:
-        config = load_gateway_config()
-    except Exception as e:
-        logger.error("Job '%s': failed to load gateway config for delivery: %s", job["id"], e)
         return
 
     pconfig = config.platforms.get(platform)
@@ -123,20 +122,37 @@ def _deliver_result(job: dict, content: str) -> None:
 
     # Run the async send in a fresh event loop (safe from any thread)
     try:
-        result = asyncio.run(_send_to_platform(platform, pconfig, chat_id, content, thread_id=thread_id))
+        result = asyncio.run(
+            send_text(
+                platform,
+                pconfig,
+                chat_id,
+                content,
+                metadata={"thread_id": thread_id} if thread_id is not None else None,
+            )
+        )
     except RuntimeError:
         # asyncio.run() fails if there's already a running loop in this thread;
         # spin up a new thread to avoid that.
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, content, thread_id=thread_id))
+            future = pool.submit(
+                asyncio.run,
+                send_text(
+                    platform,
+                    pconfig,
+                    chat_id,
+                    content,
+                    metadata={"thread_id": thread_id} if thread_id is not None else None,
+                ),
+            )
             result = future.result(timeout=30)
     except Exception as e:
         logger.error("Job '%s': delivery to %s:%s failed: %s", job["id"], platform_name, chat_id, e)
         return
 
-    if result and result.get("error"):
-        logger.error("Job '%s': delivery error: %s", job["id"], result["error"])
+    if not result.success:
+        logger.error("Job '%s': delivery error: %s", job["id"], result.error)
     else:
         logger.info("Job '%s': delivered to %s:%s", job["id"], platform_name, chat_id)
         # Mirror the delivered content into the target's gateway session

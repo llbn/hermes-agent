@@ -3,10 +3,10 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from gateway.config import Platform
-from tools.send_message_tool import send_message_tool
+from tools.send_message_tool import _send_discord, _send_slack, send_message_tool
 
 
 def _run_async_immediately(coro):
@@ -65,3 +65,58 @@ class TestSendMessageTool:
 
         assert result["success"] is True
         send_mock.assert_awaited_once_with(Platform.TELEGRAM, telegram_cfg, "-1001", "hello", thread_id="17585")
+
+
+class TestSharedOutboundBehavior:
+    @staticmethod
+    def _mock_aiohttp_json_session(payloads, response_factory):
+        mock_session = MagicMock()
+
+        def _post(*args, **kwargs):
+            payloads.append(kwargs["json"])
+            response = response_factory()
+            response.__aenter__ = AsyncMock(return_value=response)
+            response.__aexit__ = AsyncMock(return_value=False)
+            return response
+
+        mock_session.post = MagicMock(side_effect=_post)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        return mock_session
+
+    def test_send_slack_uses_adapter_formatting(self):
+        payloads = []
+
+        def _response():
+            resp = MagicMock()
+            resp.json = AsyncMock(return_value={"ok": True, "ts": "123.456"})
+            return resp
+
+        mock_session = self._mock_aiohttp_json_session(payloads, _response)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            result = asyncio.run(_send_slack("xoxb-token", "C123", "**hello**"))
+
+        assert result["success"] is True
+        assert payloads[0]["text"] == "*hello*"
+
+    def test_send_discord_uses_code_fence_aware_chunking(self):
+        payloads = []
+        message_ids = iter(["m1", "m2", "m3", "m4"])
+
+        def _response():
+            resp = MagicMock()
+            resp.status = 200
+            resp.text = AsyncMock(return_value="OK")
+            resp.json = AsyncMock(return_value={"id": next(message_ids, "mx")})
+            return resp
+
+        mock_session = self._mock_aiohttp_json_session(payloads, _response)
+        long_code = "Before\n```python\n" + ("x = 1\n" * 500) + "```\nAfter"
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            result = asyncio.run(_send_discord("bot-token", "123", long_code))
+
+        assert result["success"] is True
+        assert len(payloads) > 1
+        assert all(payload["content"].count("```") % 2 == 0 for payload in payloads)

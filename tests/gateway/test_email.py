@@ -12,6 +12,7 @@ Covers:
 9. Message dispatch and threading
 """
 
+import asyncio
 import os
 import unittest
 from email.mime.text import MIMEText
@@ -23,6 +24,16 @@ from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, AsyncMock
 
 from gateway.platforms.base import SendResult
+
+
+def _run_async(coro):
+    """Run async code in tests even when no default event loop is installed."""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
 
 
 class TestPlatformEnum(unittest.TestCase):
@@ -286,26 +297,25 @@ class TestSendMessageToolRouting(unittest.TestCase):
     """Verify email routing in send_message_tool."""
 
     def test_email_in_platform_map(self):
-        import tools.send_message_tool as smt
-        import inspect
-        source = inspect.getsource(smt._handle_send)
-        self.assertIn('"email"', source)
+        from gateway.outbound.service import resolve_outbound_platform
+        from gateway.config import Platform
+
+        self.assertEqual(resolve_outbound_platform("email"), Platform.EMAIL)
 
     def test_send_to_platform_has_email_branch(self):
-        import tools.send_message_tool as smt
-        import inspect
-        source = inspect.getsource(smt._send_to_platform)
-        self.assertIn("Platform.EMAIL", source)
+        from gateway.outbound.service import send_email_text
+
+        self.assertTrue(callable(send_email_text))
 
 
 class TestCronDelivery(unittest.TestCase):
-    """Verify email in cron scheduler platform_map."""
+    """Verify email is supported by the shared outbound platform resolver."""
 
     def test_email_in_cron_platform_map(self):
-        import cron.scheduler
-        import inspect
-        source = inspect.getsource(cron.scheduler)
-        self.assertIn('"email"', source)
+        from gateway.outbound.service import resolve_outbound_platform
+        from gateway.config import Platform
+
+        self.assertEqual(resolve_outbound_platform("email"), Platform.EMAIL)
 
 
 class TestToolset(unittest.TestCase):
@@ -407,7 +417,7 @@ class TestDispatchMessage(unittest.TestCase):
             "date": "",
         }
 
-        asyncio.get_event_loop().run_until_complete(adapter._dispatch_message(msg_data))
+        _run_async(adapter._dispatch_message(msg_data))
         adapter._message_handler.assert_not_called()
 
     def test_subject_included_in_text(self):
@@ -441,7 +451,7 @@ class TestDispatchMessage(unittest.TestCase):
             "date": "",
         }
 
-        asyncio.get_event_loop().run_until_complete(adapter._dispatch_message(msg_data))
+        _run_async(adapter._dispatch_message(msg_data))
         self.assertEqual(len(captured_events), 1)
         self.assertIn("[Subject: Help with Python]", captured_events[0].text)
         self.assertIn("How do I use lists?", captured_events[0].text)
@@ -469,7 +479,7 @@ class TestDispatchMessage(unittest.TestCase):
             "date": "",
         }
 
-        asyncio.get_event_loop().run_until_complete(adapter._dispatch_message(msg_data))
+        _run_async(adapter._dispatch_message(msg_data))
         self.assertEqual(len(captured_events), 1)
         self.assertNotIn("[Subject:", captured_events[0].text)
         self.assertEqual(captured_events[0].text, "Thanks for the help!")
@@ -497,7 +507,7 @@ class TestDispatchMessage(unittest.TestCase):
             "date": "",
         }
 
-        asyncio.get_event_loop().run_until_complete(adapter._dispatch_message(msg_data))
+        _run_async(adapter._dispatch_message(msg_data))
         self.assertEqual(len(captured_events), 1)
         self.assertIn("(empty email)", captured_events[0].text)
 
@@ -525,7 +535,7 @@ class TestDispatchMessage(unittest.TestCase):
             "date": "",
         }
 
-        asyncio.get_event_loop().run_until_complete(adapter._dispatch_message(msg_data))
+        _run_async(adapter._dispatch_message(msg_data))
         self.assertEqual(len(captured_events), 1)
         self.assertEqual(captured_events[0].message_type, MessageType.PHOTO)
         self.assertEqual(captured_events[0].media_urls, ["/tmp/img.jpg"])
@@ -553,7 +563,7 @@ class TestDispatchMessage(unittest.TestCase):
             "date": "",
         }
 
-        asyncio.get_event_loop().run_until_complete(adapter._dispatch_message(msg_data))
+        _run_async(adapter._dispatch_message(msg_data))
         event = captured_events[0]
         self.assertEqual(event.source.chat_id, "john@example.com")
         self.assertEqual(event.source.user_id, "john@example.com")
@@ -598,7 +608,7 @@ class TestThreadContext(unittest.TestCase):
             "date": "",
         }
 
-        asyncio.get_event_loop().run_until_complete(adapter._dispatch_message(msg_data))
+        _run_async(adapter._dispatch_message(msg_data))
         ctx = adapter._thread_context.get("user@test.com")
         self.assertIsNotNone(ctx)
         self.assertEqual(ctx["subject"], "Project question")
@@ -680,7 +690,7 @@ class TestSendMethods(unittest.TestCase):
             mock_server = MagicMock()
             mock_smtp.return_value = mock_server
 
-            result = asyncio.get_event_loop().run_until_complete(
+            result = _run_async(
                 adapter.send("user@test.com", "Hello from Hermes!")
             )
 
@@ -698,7 +708,7 @@ class TestSendMethods(unittest.TestCase):
         with patch("smtplib.SMTP") as mock_smtp:
             mock_smtp.side_effect = Exception("Connection refused")
 
-            result = asyncio.get_event_loop().run_until_complete(
+            result = _run_async(
                 adapter.send("user@test.com", "Hello")
             )
 
@@ -707,13 +717,12 @@ class TestSendMethods(unittest.TestCase):
 
     def test_send_image_includes_url(self):
         """send_image should include image URL in email body."""
-        import asyncio
         from unittest.mock import AsyncMock
         adapter = self._make_adapter()
 
         adapter.send = AsyncMock(return_value=SendResult(success=True))
 
-        asyncio.get_event_loop().run_until_complete(
+        _run_async(
             adapter.send_image("user@test.com", "https://img.com/photo.jpg", "My photo")
         )
 
@@ -737,7 +746,7 @@ class TestSendMethods(unittest.TestCase):
                 mock_server = MagicMock()
                 mock_smtp.return_value = mock_server
 
-                result = asyncio.get_event_loop().run_until_complete(
+                result = _run_async(
                     adapter.send_document("user@test.com", tmp_path, "Here is the file")
                 )
 
@@ -759,7 +768,7 @@ class TestSendMethods(unittest.TestCase):
         import asyncio
         adapter = self._make_adapter()
         # Should not raise
-        asyncio.get_event_loop().run_until_complete(adapter.send_typing("user@test.com"))
+        _run_async(adapter.send_typing("user@test.com"))
 
     def test_get_chat_info(self):
         """get_chat_info should return email address as chat info."""
@@ -767,7 +776,7 @@ class TestSendMethods(unittest.TestCase):
         adapter = self._make_adapter()
         adapter._thread_context["user@test.com"] = {"subject": "Test", "message_id": "<m@t>"}
 
-        info = asyncio.get_event_loop().run_until_complete(
+        info = _run_async(
             adapter.get_chat_info("user@test.com")
         )
 
@@ -804,7 +813,7 @@ class TestConnectDisconnect(unittest.TestCase):
             mock_server = MagicMock()
             mock_smtp.return_value = mock_server
 
-            result = asyncio.get_event_loop().run_until_complete(adapter.connect())
+            result = _run_async(adapter.connect())
 
             self.assertTrue(result)
             self.assertTrue(adapter._running)
@@ -821,7 +830,7 @@ class TestConnectDisconnect(unittest.TestCase):
         adapter = self._make_adapter()
 
         with patch("imaplib.IMAP4_SSL", side_effect=Exception("IMAP down")):
-            result = asyncio.get_event_loop().run_until_complete(adapter.connect())
+            result = _run_async(adapter.connect())
             self.assertFalse(result)
             self.assertFalse(adapter._running)
 
@@ -835,7 +844,7 @@ class TestConnectDisconnect(unittest.TestCase):
 
         with patch("imaplib.IMAP4_SSL", return_value=mock_imap), \
              patch("smtplib.SMTP", side_effect=Exception("SMTP down")):
-            result = asyncio.get_event_loop().run_until_complete(adapter.connect())
+            result = _run_async(adapter.connect())
             self.assertFalse(result)
 
     def test_disconnect_cancels_poll(self):
@@ -845,7 +854,7 @@ class TestConnectDisconnect(unittest.TestCase):
         adapter._running = True
         adapter._poll_task = asyncio.ensure_future(asyncio.sleep(100))
 
-        asyncio.get_event_loop().run_until_complete(adapter.disconnect())
+        _run_async(adapter.disconnect())
 
         self.assertFalse(adapter._running)
         self.assertIsNone(adapter._poll_task)
@@ -967,7 +976,7 @@ class TestPollLoop(unittest.TestCase):
         mock_imap.fetch.return_value = ("OK", [(b"1", raw_email.as_bytes())])
 
         with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
-            asyncio.get_event_loop().run_until_complete(adapter._check_inbox())
+            _run_async(adapter._check_inbox())
 
         self.assertEqual(len(dispatched), 1)
         self.assertEqual(dispatched[0]["subject"], "Inbox Test")
@@ -991,7 +1000,7 @@ class TestSendEmailStandalone(unittest.TestCase):
             mock_server = MagicMock()
             mock_smtp.return_value = mock_server
 
-            result = asyncio.get_event_loop().run_until_complete(
+            result = _run_async(
                 _send_email({"address": "hermes@test.com", "smtp_host": "smtp.test.com"}, "user@test.com", "Hello")
             )
 
@@ -1009,7 +1018,7 @@ class TestSendEmailStandalone(unittest.TestCase):
         from tools.send_message_tool import _send_email
 
         with patch("smtplib.SMTP", side_effect=Exception("SMTP error")):
-            result = asyncio.get_event_loop().run_until_complete(
+            result = _run_async(
                 _send_email({"address": "hermes@test.com", "smtp_host": "smtp.test.com"}, "user@test.com", "Hello")
             )
 
@@ -1022,7 +1031,7 @@ class TestSendEmailStandalone(unittest.TestCase):
         import asyncio
         from tools.send_message_tool import _send_email
 
-        result = asyncio.get_event_loop().run_until_complete(
+        result = _run_async(
             _send_email({}, "user@test.com", "Hello")
         )
 

@@ -562,23 +562,16 @@ class SignalAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Send a text message."""
-        await self._stop_typing_indicator(chat_id)
+        from gateway.outbound.service import send_signal_text
 
-        params: Dict[str, Any] = {
-            "account": self.account,
-            "message": content,
-        }
-
-        if chat_id.startswith("group:"):
-            params["groupId"] = chat_id[6:]
-        else:
-            params["recipient"] = [chat_id]
-
-        result = await self._rpc("send", params)
-
-        if result is not None:
-            return SendResult(success=True)
-        return SendResult(success=False, error="RPC send failed")
+        return await send_signal_text(
+            self.config,
+            chat_id,
+            content,
+            reply_to=reply_to,
+            metadata=metadata,
+            adapter=self,
+        )
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """Send a typing indicator."""

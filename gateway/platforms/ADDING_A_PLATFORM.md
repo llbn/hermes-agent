@@ -162,55 +162,45 @@ And add it to the `hermes-gateway` composite:
 
 ---
 
-## 8. Cron Delivery (`cron/scheduler.py`)
+## 8. Shared Outbound Delivery (`gateway/outbound/service.py`)
 
-Add to `platform_map` in `_deliver_result()`:
+Register a single outbound text sender for your platform:
 
 ```python
-platform_map = {
+from gateway.outbound.service import register_text_sender
+
+async def send_your_platform_text(config, chat_id, content, reply_to=None, metadata=None, adapter=None):
     ...
-    "your_platform": Platform.YOUR_PLATFORM,
-}
+
+register_text_sender(Platform.YOUR_PLATFORM, send_your_platform_text)
 ```
 
-Without this, `schedule_cronjob(deliver="your_platform")` silently fails.
+This sender is the shared delivery path used by:
+
+- The live gateway adapter's `send()` method
+- `send_message`
+- Cron delivery from `schedule_cronjob`
+
+Put platform-specific text formatting, chunking, reply/thread handling, and
+direct-send behavior here so every outbound path stays consistent.
+
+Add your platform to `_OUTBOUND_PLATFORM_MAP` in `gateway/outbound/service.py`
+so `send_message(target="your_platform:...")` and cron delivery specs can
+resolve it.
+
+Update the `send_message` tool schema `target` description to include your
+platform example.
 
 ---
 
-## 9. Send Message Tool (`tools/send_message_tool.py`)
-
-Add to `platform_map` in `send_message_tool()`:
-
-```python
-platform_map = {
-    ...
-    "your_platform": Platform.YOUR_PLATFORM,
-}
-```
-
-Add routing in `_send_to_platform()`:
-
-```python
-elif platform == Platform.YOUR_PLATFORM:
-    return await _send_your_platform(pconfig, chat_id, message)
-```
-
-Implement `_send_your_platform()` — a standalone async function that sends
-a single message without requiring the full adapter (for use by cron jobs
-and the send_message tool outside the gateway process).
-
-Update the tool schema `target` description to include your platform example.
-
----
-
-## 10. Cronjob Tool Schema (`tools/cronjob_tools.py`)
+## 9. Cronjob Tool Schema (`tools/cronjob_tools.py`)
 
 Update the `deliver` parameter description and docstring to mention your
 platform as a delivery option.
 
 ---
 
-## 11. Channel Directory (`gateway/channel_directory.py`)
+## 10. Channel Directory (`gateway/channel_directory.py`)
 
 If your platform can't enumerate chats (most can't), add it to the
 session-based discovery list:
@@ -221,7 +211,7 @@ for plat_name in ("telegram", "whatsapp", "signal", "your_platform"):
 
 ---
 
-## 12. Status Display (`hermes_cli/status.py`)
+## 11. Status Display (`hermes_cli/status.py`)
 
 Add to the `platforms` dict in the Messaging Platforms section:
 
@@ -234,7 +224,7 @@ platforms = {
 
 ---
 
-## 13. Gateway Setup Wizard (`hermes_cli/gateway.py`)
+## 12. Gateway Setup Wizard (`hermes_cli/gateway.py`)
 
 Add to the `_PLATFORMS` list:
 
