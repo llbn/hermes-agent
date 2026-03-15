@@ -333,43 +333,15 @@ class WhatsAppAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None
     ) -> SendResult:
         """Send a message via the WhatsApp bridge."""
-        if not self._running:
-            return SendResult(success=False, error="Not connected")
-        
-        try:
-            import aiohttp
-            
-            async with aiohttp.ClientSession() as session:
-                payload = {
-                    "chatId": chat_id,
-                    "message": content,
-                }
-                if reply_to:
-                    payload["replyTo"] = reply_to
-                
-                async with session.post(
-                    f"http://localhost:{self._bridge_port}/send",
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=30)
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return SendResult(
-                            success=True,
-                            message_id=data.get("messageId"),
-                            raw_response=data
-                        )
-                    else:
-                        error = await resp.text()
-                        return SendResult(success=False, error=error)
-                        
-        except ImportError:
-            return SendResult(
-                success=False, 
-                error="aiohttp not installed. Run: pip install aiohttp"
-            )
-        except Exception as e:
-            return SendResult(success=False, error=str(e))
+        from gateway.outbound.service import send_connected_text
+
+        return await send_connected_text(
+            self,
+            chat_id=str(chat_id),
+            content=content,
+            reply_to=reply_to,
+            metadata=metadata,
+        )
 
     async def edit_message(
         self,
@@ -637,4 +609,3 @@ class WhatsAppAdapter(BasePlatformAdapter):
         except Exception as e:
             print(f"[{self.name}] Error building event: {e}")
             return None
-

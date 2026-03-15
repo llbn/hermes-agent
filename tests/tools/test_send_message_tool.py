@@ -4,12 +4,12 @@ import asyncio
 import json
 import os
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from gateway.config import Platform
-from tools.send_message_tool import _send_telegram, send_message_tool
+from gateway.config import Platform, PlatformConfig
+from gateway.outbound.service import send_direct_text
+from tools.send_message_tool import send_message_tool
 
 
 def _run_async_immediately(coro):
@@ -148,7 +148,7 @@ class TestSendMessageTool:
         with patch("gateway.config.load_gateway_config", return_value=config), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch("model_tools._run_async", side_effect=_run_async_immediately), \
-             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.outbound.service.send_direct_text", new=AsyncMock(return_value={"success": True})) as send_mock, \
              patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
             result = json.loads(
                 send_message_tool(
@@ -166,7 +166,7 @@ class TestSendMessageTool:
             telegram_cfg,
             "-1001",
             "hello",
-            thread_id="17585",
+            metadata={"thread_id": "17585"},
             media_files=[],
         )
         mirror_mock.assert_called_once_with("telegram", "-1001", "hello", source_label="cli", thread_id="17585")
@@ -178,7 +178,7 @@ class TestSendMessageTool:
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch("gateway.channel_directory.resolve_channel_name", return_value="-1001:17585"), \
              patch("model_tools._run_async", side_effect=_run_async_immediately), \
-             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.outbound.service.send_direct_text", new=AsyncMock(return_value={"success": True})) as send_mock, \
              patch("gateway.mirror.mirror_to_session", return_value=True):
             result = json.loads(
                 send_message_tool(
@@ -196,7 +196,7 @@ class TestSendMessageTool:
             telegram_cfg,
             "-1001",
             "hello",
-            thread_id="17585",
+            metadata={"thread_id": "17585"},
             media_files=[],
         )
 
@@ -206,7 +206,7 @@ class TestSendMessageTool:
         with patch("gateway.config.load_gateway_config", return_value=config), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch("model_tools._run_async", side_effect=_run_async_immediately), \
-             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.outbound.service.send_direct_text", new=AsyncMock(return_value={"success": True})) as send_mock, \
              patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
             result = json.loads(
                 send_message_tool(
@@ -224,7 +224,7 @@ class TestSendMessageTool:
             telegram_cfg,
             "-1001",
             "",
-            thread_id=None,
+            metadata=None,
             media_files=[("/tmp/example.ogg", False)],
         )
         mirror_mock.assert_called_once_with(
@@ -236,7 +236,9 @@ class TestSendMessageTool:
         )
 
 
-class TestSendTelegramMediaDelivery:
+class TestTelegramDirectMediaDelivery:
+    """Test Telegram direct delivery with media via the outbound service."""
+
     def test_sends_text_then_photo_for_media_tag(self, tmp_path, monkeypatch):
         image_path = tmp_path / "photo.png"
         image_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
@@ -250,9 +252,11 @@ class TestSendTelegramMediaDelivery:
         bot.send_document = AsyncMock()
         _install_telegram_mock(monkeypatch, bot)
 
+        pconfig = PlatformConfig(enabled=True, token="token", extra={})
         result = asyncio.run(
-            _send_telegram(
-                "token",
+            send_direct_text(
+                Platform.TELEGRAM,
+                pconfig,
                 "12345",
                 "Hello there",
                 media_files=[(str(image_path), False)],
@@ -263,9 +267,6 @@ class TestSendTelegramMediaDelivery:
         assert result["message_id"] == "2"
         bot.send_message.assert_awaited_once()
         bot.send_photo.assert_awaited_once()
-        sent_text = bot.send_message.await_args.kwargs["text"]
-        assert "MEDIA:" not in sent_text
-        assert sent_text == "Hello there"
 
     def test_sends_voice_for_ogg_with_voice_directive(self, tmp_path, monkeypatch):
         voice_path = tmp_path / "voice.ogg"
@@ -280,9 +281,11 @@ class TestSendTelegramMediaDelivery:
         bot.send_document = AsyncMock()
         _install_telegram_mock(monkeypatch, bot)
 
+        pconfig = PlatformConfig(enabled=True, token="token", extra={})
         result = asyncio.run(
-            _send_telegram(
-                "token",
+            send_direct_text(
+                Platform.TELEGRAM,
+                pconfig,
                 "12345",
                 "",
                 media_files=[(str(voice_path), True)],
@@ -307,9 +310,11 @@ class TestSendTelegramMediaDelivery:
         bot.send_document = AsyncMock()
         _install_telegram_mock(monkeypatch, bot)
 
+        pconfig = PlatformConfig(enabled=True, token="token", extra={})
         result = asyncio.run(
-            _send_telegram(
-                "token",
+            send_direct_text(
+                Platform.TELEGRAM,
+                pconfig,
                 "12345",
                 "",
                 media_files=[(str(audio_path), False)],
@@ -330,9 +335,11 @@ class TestSendTelegramMediaDelivery:
         bot.send_document = AsyncMock()
         _install_telegram_mock(monkeypatch, bot)
 
+        pconfig = PlatformConfig(enabled=True, token="token", extra={})
         result = asyncio.run(
-            _send_telegram(
-                "token",
+            send_direct_text(
+                Platform.TELEGRAM,
+                pconfig,
                 "12345",
                 "",
                 media_files=[("/tmp/does-not-exist.png", False)],

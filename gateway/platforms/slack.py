@@ -149,45 +149,15 @@ class SlackAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Send a message to a Slack channel or DM."""
-        if not self._app:
-            return SendResult(success=False, error="Not connected")
+        from gateway.outbound.service import send_connected_text
 
-        try:
-            # Convert standard markdown → Slack mrkdwn
-            formatted = self.format_message(content)
-
-            # Split long messages, preserving code block boundaries
-            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
-
-            thread_ts = self._resolve_thread_ts(reply_to, metadata)
-            last_result = None
-
-            # reply_broadcast: also post thread replies to the main channel.
-            # Controlled via platform config: gateway.slack.reply_broadcast
-            broadcast = self.config.extra.get("reply_broadcast", False)
-
-            for i, chunk in enumerate(chunks):
-                kwargs = {
-                    "channel": chat_id,
-                    "text": chunk,
-                }
-                if thread_ts:
-                    kwargs["thread_ts"] = thread_ts
-                    # Only broadcast the first chunk of the first reply
-                    if broadcast and i == 0:
-                        kwargs["reply_broadcast"] = True
-
-                last_result = await self._app.client.chat_postMessage(**kwargs)
-
-            return SendResult(
-                success=True,
-                message_id=last_result.get("ts") if last_result else None,
-                raw_response=last_result,
-            )
-
-        except Exception as e:  # pragma: no cover - defensive logging
-            logger.error("[Slack] Send error: %s", e, exc_info=True)
-            return SendResult(success=False, error=str(e))
+        return await send_connected_text(
+            self,
+            chat_id=str(chat_id),
+            content=content,
+            reply_to=reply_to,
+            metadata=metadata,
+        )
 
     async def edit_message(
         self,
@@ -253,12 +223,9 @@ class SlackAdapter(BasePlatformAdapter):
         Prefers metadata thread_id (the thread parent's ts, set by the
         gateway) over reply_to (which may be a child message's ts).
         """
-        if metadata:
-            if metadata.get("thread_id"):
-                return metadata["thread_id"]
-            if metadata.get("thread_ts"):
-                return metadata["thread_ts"]
-        return reply_to
+        from gateway.outbound.slack import resolve_slack_thread_ts
+
+        return resolve_slack_thread_ts(reply_to, metadata)
 
     async def _upload_file(
         self,
@@ -287,86 +254,10 @@ class SlackAdapter(BasePlatformAdapter):
     # ----- Markdown → mrkdwn conversion -----
 
     def format_message(self, content: str) -> str:
-        """Convert standard markdown to Slack mrkdwn format.
+        """Convert standard markdown to Slack mrkdwn format."""
+        from gateway.outbound.slack import format_slack_message
 
-        Protected regions (code blocks, inline code) are extracted first so
-        their contents are never modified.  Standard markdown constructs
-        (headers, bold, italic, links) are translated to mrkdwn syntax.
-        """
-        if not content:
-            return content
-
-        placeholders: dict = {}
-        counter = [0]
-
-        def _ph(value: str) -> str:
-            """Stash value behind a placeholder that survives later passes."""
-            key = f"\x00SL{counter[0]}\x00"
-            counter[0] += 1
-            placeholders[key] = value
-            return key
-
-        text = content
-
-        # 1) Protect fenced code blocks (``` ... ```)
-        text = re.sub(
-            r'(```(?:[^\n]*\n)?[\s\S]*?```)',
-            lambda m: _ph(m.group(0)),
-            text,
-        )
-
-        # 2) Protect inline code (`...`)
-        text = re.sub(r'(`[^`]+`)', lambda m: _ph(m.group(0)), text)
-
-        # 3) Convert markdown links [text](url) → <url|text>
-        text = re.sub(
-            r'\[([^\]]+)\]\(([^)]+)\)',
-            lambda m: _ph(f'<{m.group(2)}|{m.group(1)}>'),
-            text,
-        )
-
-        # 4) Convert headers (## Title) → *Title* (bold)
-        def _convert_header(m):
-            inner = m.group(1).strip()
-            # Strip redundant bold markers inside a header
-            inner = re.sub(r'\*\*(.+?)\*\*', r'\1', inner)
-            return _ph(f'*{inner}*')
-
-        text = re.sub(
-            r'^#{1,6}\s+(.+)$', _convert_header, text, flags=re.MULTILINE
-        )
-
-        # 5) Convert bold: **text** → *text* (Slack bold)
-        text = re.sub(
-            r'\*\*(.+?)\*\*',
-            lambda m: _ph(f'*{m.group(1)}*'),
-            text,
-        )
-
-        # 6) Convert italic: _text_ stays as _text_ (already Slack italic)
-        #    Single *text* → _text_ (Slack italic)
-        text = re.sub(
-            r'(?<!\*)\*([^*\n]+)\*(?!\*)',
-            lambda m: _ph(f'_{m.group(1)}_'),
-            text,
-        )
-
-        # 7) Convert strikethrough: ~~text~~ → ~text~
-        text = re.sub(
-            r'~~(.+?)~~',
-            lambda m: _ph(f'~{m.group(1)}~'),
-            text,
-        )
-
-        # 8) Convert blockquotes: > text → > text (same syntax, just ensure
-        #    no extra escaping happens to the > character)
-        # Slack uses the same > prefix, so this is a no-op for content.
-
-        # 9) Restore placeholders in reverse order
-        for key in reversed(list(placeholders.keys())):
-            text = text.replace(key, placeholders[key])
-
-        return text
+        return format_slack_message(content)
 
     # ----- Reactions -----
 
