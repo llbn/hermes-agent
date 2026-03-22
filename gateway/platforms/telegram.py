@@ -25,6 +25,7 @@ try:
         filters,
     )
     from telegram.constants import ParseMode, ChatType
+    from telegram.request import HTTPXRequest
     TELEGRAM_AVAILABLE = True
 except ImportError:
     TELEGRAM_AVAILABLE = False
@@ -37,6 +38,7 @@ except ImportError:
     filters = None
     ParseMode = None
     ChatType = None
+    HTTPXRequest = None
 
     # Mock ContextTypes so type annotations using ContextTypes.DEFAULT_TYPE
     # don't crash during class definition when the library isn't installed.
@@ -230,8 +232,21 @@ class TelegramAdapter(BasePlatformAdapter):
                 self._set_fatal_error("telegram_token_lock", message, retryable=False)
                 return False
 
-            # Build the application
-            self._app = Application.builder().token(self.config.token).build()
+            # Build the application with separate connection pools for
+            # regular API requests and long-poll get_updates.  Without this,
+            # rapid edit_message_text calls during streaming can evict the
+            # idle polling connection, causing httpx.ReadError crashes.
+            request = HTTPXRequest(connection_pool_size=8)
+            get_updates_request = HTTPXRequest(connection_pool_size=2)
+
+            self._app = (
+                Application.builder()
+                .token(self.config.token)
+                .request(request)
+                .get_updates_request(get_updates_request)
+                .get_updates_read_timeout(30)
+                .build()
+            )
             self._bot = self._app.bot
             
             # Register handlers
